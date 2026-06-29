@@ -63,6 +63,7 @@ export const linklensApi = {
   startSearch: (data: any) => api.post("/api/linklens/search", data).then((r) => r.data),
   listSearches: () => api.get("/api/linklens/searches").then((r) => r.data),
   getSearch: (id: number) => api.get(`/api/linklens/searches/${id}`).then((r) => r.data),
+  deleteSearch: (id: number) => api.delete(`/api/linklens/searches/${id}`).then((r) => r.data),
   exportProfiles: (id: number) =>
     api.get(`/api/linklens/searches/${id}/export`, { responseType: "blob" }).then((r) => r.data),
 };
