@@ -89,8 +89,6 @@ export default function DashboardPage() {
           </Link>
         ))}
       </div>
-
-      {/* RECENT ACTIVITY */}
-      
+    </div>
   );
 }
