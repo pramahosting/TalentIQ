@@ -113,6 +113,7 @@ class JobSearchOut(BaseModel):
     results_count: int
     searched_at: datetime
     jobs: List[JobOut] = []
+    notice: Optional[str] = None
 
     model_config = {"from_attributes": True}
 

@@ -393,3 +393,17 @@ async def delete_search(
     await db.delete(search)
     await db.commit()
     return {"message": "Deleted"}
+
+
+@router.delete("/searches")
+async def delete_all_searches(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete ALL searches for the current user."""
+    from sqlalchemy import delete as sql_delete
+    await db.execute(
+        sql_delete(LinkLensSearch).where(LinkLensSearch.user_id == current_user.id)
+    )
+    await db.commit()
+    return {"message": "All searches deleted"}

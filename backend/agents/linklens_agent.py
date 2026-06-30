@@ -185,106 +185,158 @@ def extract_title(headline: str) -> str:
     return part if len(part) > 3 else "Not found"
 
 
-# ── COMPANY ───────────────────────────────────────────────────────────────────
+# ── COMPANY + LOCATION (unified top-card extractor) ─────────────────────────
+
+def _extract_top_card(html: str, name: str) -> tuple:
+    """
+    Extract headline, company, location from the LinkedIn top card.
+
+    Confirmed HTML structure (consistent across all profiles):
+      [nav junk]
+      name (first occurrence - mini card)
+      headline
+      More / Message / Follow / Connect
+      name (SECOND occurrence - main card)   ← anchor
+      · 1st / · 2nd / · 3rd  (one or two degree lines)
+      headline (repeated)
+      Company · Association  OR  just Company name
+      Location (City, State, Country  OR  Greater X Area)
+      ·  (lone bullet separator)
+      Contact info
+    """
+    lines = _visible_lines(html)
+    name_lower = name.lower().strip() if name and name != "Not found" else ""
+    name_first = name_lower.split()[0] if name_lower else ""
+
+    DEGREE_RE  = re.compile(r"^[·•]\s*(1st|2nd|3rd\+?|[23]rd\+?)$")
+    JUNK_LINES = {"more", "connect", "follow", "about", "contact info",
+                  "·", "••", "activity", "show all"}
+    MSG_RE     = re.compile(r"^(message|follow)\s+\w", re.I)
+    CONN_RE    = re.compile(r"^\d+\s*(followers?|connections?|reactions?)", re.I)
+
+    PRONOUNS_RE = re.compile(r"^(She|He|They|She/Her|He/Him|They/Them)[/,]?(Her|Him|Them)?$", re.I)
+
+    def is_skip(line: str) -> bool:
+        low = line.lower().strip()
+        if low in JUNK_LINES: return True
+        if DEGREE_RE.match(line): return True
+        if MSG_RE.match(line): return True
+        if CONN_RE.match(low): return True
+        if PRONOUNS_RE.match(line): return True
+        if re.match(r"^\d+$", line): return True
+        if re.match(r"^\w+ is a mutual connection$", low): return True
+        return False
+
+    # Find the SECOND occurrence of name in BODY (skip title tag area, lines 0-9)
+    # Structure: line 0-1 = title tag text, line 2+ = body
+    # First body occurrence = mini nav card, second = main profile card (our anchor)
+    anchor = 15  # default fallback
+    name_count = 0
+    for i, line in enumerate(lines):
+        if i < 8:
+            continue  # Skip title tag duplicates at top
+        low = line.lower()
+        # Skip "Message X", "Follow X", "Connect" lines
+        if re.match(r"^(message|follow|connect)\b", low):
+            continue
+        # Skip lines containing "LinkedIn" (title tag artifact)
+        if "linkedin" in low:
+            continue
+        if name_first and name_first in low and len(line) < 80:
+            name_count += 1
+            if name_count == 2:
+                anchor = i
+                break
+            elif name_count == 1:
+                anchor = i  # keep first as fallback
+
+    # Now scan forward from anchor
+    headline = ""
+    company  = ""
+    location = ""
+
+    LOCATION_RE = re.compile(
+        r"(Greater\s+\w[\w\s]+Area$"
+        r"|[A-Z][A-Za-z\s'\-]+,\s*[A-Z][A-Za-z\s'\-]+"
+        r"|^(?:Australia|India|United States|USA|UK|United Kingdom"
+        r"|Canada|Singapore|UAE|New Zealand|Germany|Netherlands"
+        r"|Ireland|South Africa|Pakistan|Malaysia|Philippines|Remote)$)",
+        re.I
+    )
+
+    i = anchor + 1
+    phase = "degree"   # → headline → company → location
+
+    while i < min(anchor + 18, len(lines)):
+        line = lines[i]
+        low  = line.lower().strip()
+
+        # Always skip junk
+        if is_skip(line):
+            i += 1
+            continue
+
+        # Skip if it's the name again
+        if name_first and name_first in low and len(line) < 70:
+            i += 1
+            continue
+
+        if phase == "degree":
+            # Degree lines already filtered by DEGREE_RE in is_skip
+            # First real line after degree = headline
+            if len(line) > 8:
+                headline = line
+                phase = "company"
+
+        elif phase == "company":
+            # Location check first
+            if LOCATION_RE.search(line):
+                location = line
+                break
+
+            # Company·Assoc pattern: "Nexus Business Partners · Macquarie University"
+            if "·" in line and not DEGREE_RE.match(line):
+                company = line.split("·")[0].strip()
+                # Clean employment type suffix
+                company = re.sub(
+                    r"\s*[·,]\s*(Full-time|Part-time|Contract|Freelance|Self-employed).*$",
+                    "", company, flags=re.I
+                ).strip()
+                phase = "location"
+
+            # Plain company name (no ·)
+            elif len(line) > 3 and not re.match(r"^\d", line) and "·" not in line:
+                company = line.strip()
+                phase = "location"
+
+        elif phase == "location":
+            # Lone "·" means next useful line is location
+            if line == "·":
+                i += 1
+                continue
+
+            if LOCATION_RE.search(line):
+                location = line
+            break
+
+        i += 1
+
+    return headline, company, location
+
 
 def extract_company(html: str, name: str) -> str:
-    """
-    Company appears on the "Company · Association" line in the top card.
-    Pattern: "Emergency & Preventative Accounting Specialists · CPA Australia"
-    This line appears after the headline and before location.
-    """
-    lines = _visible_lines(html)
+    """Extract current company from LinkedIn top card."""
+    _, company, _ = _extract_top_card(html, name)
+    return company if company else "Not found"
 
-    # Find the region of interest: lines 15-45 (top card area)
-    # The company line has "·" and is NOT a connection/degree/notification line
-    for line in lines[12:50]:
-        if "·" not in line:
-            continue
-        low = line.lower()
-        if _is_junk(line):
-            continue
-        if re.search(r"1st|2nd|3rd", line):
-            continue
-        if "notification" in low or "connection" in low or "follower" in low:
-            continue
-        if "skip to" in low:
-            continue
-        # Must have letter content on both sides of ·
-        parts = [p.strip() for p in line.split("·")]
-        if len(parts) >= 2 and len(parts[0]) > 3 and re.search(r"[A-Za-z]{2,}", parts[0]):
-            # Clean employment type suffixes
-            company = re.sub(
-                r"\s*·?\s*(Full-time|Part-time|Contract|Freelance|Self-employed).*$",
-                "", parts[0], flags=re.I
-            ).strip()
-            if len(company) > 2:
-                return company
-
-    # Fallback: standalone company name appears repeated after top card
-    # e.g. lines 29-31: "Emergency & Preventative Accounting Specialists", "CPA Australia"
-    # Look for a capitalised non-junk line in range 25-40 that isn't location-like
-    LOCATION_LIKE = re.compile(
-        r"Greater|Area|Australia$|India$|^[A-Z][a-z]+,\s*[A-Z]", re.I
-    )
-    for line in lines[22:45]:
-        if _is_junk(line):
-            continue
-        if re.search(r"1st|2nd|3rd|\d+\s*(connection|follower)", line, re.I):
-            continue
-        if "·" in line:
-            continue
-        if LOCATION_LIKE.search(line):
-            continue
-        if len(line) > 5 and re.search(r"[A-Za-z]{3,}", line):
-            # Likely a company name
-            return line.strip()
-
-    return "Not found"
-
-
-# ── LOCATION ──────────────────────────────────────────────────────────────────
 
 def extract_location(html: str) -> str:
-    """
-    Location line patterns seen in real HTMLs:
-    - "Greater Sydney Area"
-    - "Australia"
-    - "Melbourne, Victoria, Australia"
-    - "New Delhi, India"
-    It appears right after the company · association line in the top card.
-    """
-    lines = _visible_lines(html)
-
-    # Regex patterns in priority order
-    patterns = [
-        # "Greater X Area"
-        re.compile(r"^Greater\s+\w[\w\s]+Area$", re.I),
-        # "City, State, Country" or "City, Country"
-        re.compile(r"^[A-Z][A-Za-z\s'\-\.]+,\s*[A-Z][A-Za-z\s'\-\.]+$"),
-        # Single country names
-        re.compile(
-            r"^(Australia|India|Canada|United States|USA|UK|United Kingdom|"
-            r"Singapore|UAE|Germany|Netherlands|Ireland|New Zealand|"
-            r"South Africa|Pakistan|Malaysia|Philippines)$", re.I
-        ),
-        # "Remote" / "Hybrid"
-        re.compile(r"^(Remote|Hybrid|On-site)$", re.I),
-    ]
-
-    for line in lines[12:60]:
-        if _is_junk(line):
-            continue
-        # Don't return person's name as location
-        if re.search(r"\|", line):
-            continue
-        if "LinkedIn" in line:
-            continue
-        for pat in patterns:
-            if pat.match(line.strip()):
-                return line.strip()
-
-    return "Not found"
-
+    """Extract location from LinkedIn top card."""
+    soup = BeautifulSoup(html, "html.parser")
+    title_tag = soup.find("title")
+    name = title_tag.get_text(strip=True).split("|")[0].strip() if title_tag else ""
+    _, _, location = _extract_top_card(html, name)
+    return location if location else "Not found"
 
 # ── SKILLS ────────────────────────────────────────────────────────────────────
 
@@ -707,11 +759,15 @@ def parse_profile_html(
     cb(f"⏳ Processing: {fname}")
 
     try:
-        name     = extract_name(html)
-        headline = extract_headline(html, name)
+        name                     = extract_name(html)
+        headline, company, location = _extract_top_card(html, name)
+        if not headline:
+            headline = extract_headline(html, name)
+        if not company:
+            company = "Not found"
+        if not location:
+            location = "Not found"
         title    = extract_title(headline)
-        company  = extract_company(html, name)
-        location = extract_location(html)
         skills   = extract_skills(html)
         exp_list = extract_experience(html, name, headline)
         certs    = extract_certifications(html, headline)

@@ -12,6 +12,8 @@ from db.database import engine
 from sqlalchemy import text
 
 MIGRATIONS = [
+    "ALTER TABLE tiq_jobintel_records ADD COLUMN IF NOT EXISTS job_group VARCHAR(200)",
+    "ALTER TABLE tiq_jobintel_records ADD COLUMN IF NOT EXISTS company_type VARCHAR(200)",
     # Create JobLens tables if they don't exist (added after initial deployment)
     """CREATE TABLE IF NOT EXISTS tiq_joblens_sessions (
         id SERIAL PRIMARY KEY,

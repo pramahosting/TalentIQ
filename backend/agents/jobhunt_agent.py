@@ -68,15 +68,26 @@ def scrape_jobs_adzuna(
     salary_max: Optional[int],
     adzuna_app_id: str,
     adzuna_app_key: str,
+    country: str = "au",
 ) -> List[Dict]:
-    """Fetch jobs from Adzuna API and return normalized list"""
-    base_url = "https://api.adzuna.com/v1/api/jobs/au/search/1"
+    """Fetch jobs from Adzuna API and return normalized list.
+
+    NOTE: Adzuna aggregates listings from thousands of job boards (including
+    Seek, Indeed, and many company career sites) but does NOT expose which
+    individual board each listing came from in its API response — LinkedIn
+    jobs are not part of Adzuna's index at all (LinkedIn blocks aggregators).
+    Direct scraping of Seek/LinkedIn/Indeed search pages is blocked by their
+    anti-bot protections and is against their Terms of Service, so this
+    function uses Adzuna's official API as the legitimate aggregator.
+    """
+    base_url = f"https://api.adzuna.com/v1/api/jobs/{country}/search/1"
     params = {
         "app_id": adzuna_app_id,
         "app_key": adzuna_app_key,
-        "results_per_page": 20,
+        "results_per_page": 50,
         "what": role,
         "content-type": "application/json",
+        "sort_by": "date",
     }
 
     if location and location.lower() != "all":
@@ -92,13 +103,21 @@ def scrape_jobs_adzuna(
 
     try:
         response = requests.get(base_url, params=params, timeout=15)
+        if response.status_code == 401:
+            return [{"error": "Adzuna authentication failed — check your App ID and App Key in Settings."}]
+        if response.status_code == 403:
+            return [{"error": "Adzuna API access blocked (403). Check network egress settings allow api.adzuna.com."}]
         response.raise_for_status()
         data = response.json()
+    except requests.exceptions.Timeout:
+        return [{"error": "Adzuna API timed out. Try again in a moment."}]
+    except requests.exceptions.ConnectionError:
+        return [{"error": "Could not connect to Adzuna API. Check network/internet access."}]
     except Exception as e:
-        return [{"error": str(e)}]
+        return [{"error": f"Adzuna API error: {str(e)[:150]}"}]
 
     jobs = []
-    cutoff = datetime.utcnow() - timedelta(days=15)
+    cutoff = datetime.utcnow() - timedelta(days=60)
 
     for job in data.get("results", []):
         created_str = job.get("created", "")[:10]
@@ -120,7 +139,8 @@ def scrape_jobs_adzuna(
             "location": normalize_location(raw_location),
             "job_type": job.get("contract_time", "N/A"),
             "description": description,
-            "source": classify_company_type(company),
+            "source": "Adzuna",
+            "company_type": classify_company_type(company),
             "apply_link": job.get("redirect_url", ""),
             "source_site": "Adzuna",
             "salary_min": job.get("salary_min"),

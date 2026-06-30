@@ -52,6 +52,7 @@ def extract_text(content: bytes, filename: str) -> str:
         except: pass
         return ""
     if fname.endswith((".docx", ".doc")):
+        # Try python-docx first (works on .docx)
         try:
             import docx
             doc = docx.Document(io.BytesIO(content))
@@ -63,11 +64,29 @@ def extract_text(content: bytes, filename: str) -> str:
             t = "\n".join(parts).strip()
             if t: return t
         except: pass
+        # Try docx2txt
         try:
             import docx2txt
             t = docx2txt.process(io.BytesIO(content))
             if t and t.strip(): return t.strip()
         except: pass
+        # Fallback for old binary .doc (OLE2 format): extract ASCII text stream
+        if fname.endswith(".doc"):
+            try:
+                import re as _re
+                raw = content.decode("latin-1", errors="ignore")
+                chunks = _re.findall(r"[\x20-\x7e\r\n\t]{3,}", raw)
+                text = "\n".join(c.strip() for c in chunks if c.strip())
+                # Remove common .doc binary artifacts
+                text = _re.sub(r"bjbj[a-zA-Z0-9]+", "", text)
+                text = _re.sub(r"WW8Num\w+", "", text)
+                text = _re.sub(r'HYPERLINK\s+"[^"]+"', "", text)
+                text = _re.sub(r"\\r", "\n", text)
+                text = _re.sub(r"\s{4,}", "\n", text)
+                text = _re.sub(r"\n{3,}", "\n\n", text).strip()
+                if len(text) > 100:
+                    return text
+            except: pass
         return ""
     for enc in ("utf-8", "latin-1"):
         try: return content.decode(enc).strip()
@@ -142,7 +161,7 @@ Return ONLY valid JSON in this format:
 
 
 def _keyword_extract_jd(jd_text: str) -> list:
-    """Fallback keyword extraction without LLM."""
+    """Fallback keyword extraction — returns only real skills, not JD prose."""
     DOMAIN_SKILLS = [
         "python","javascript","typescript","react","node","sql","postgresql","mongodb",
         "aws","azure","gcp","docker","kubernetes","git","agile","rest","api","graphql",
@@ -153,16 +172,13 @@ def _keyword_extract_jd(jd_text: str) -> list:
         "cpa","ca","acca","cma","mba","cfa","accounting","tax","audit","payroll",
         "financial reporting","budgeting","forecasting","reconciliation","ifrs","gaap",
         "leadership","communication","problem solving","scrum","project management",
-        "togaf","pmp","csm","hadoop","hive","tableau","datastage","tibco",
+        "togaf","pmp","csm","hadoop","hive","datastage","tibco","react native",
+        "devops","ci/cd","terraform","ansible","linux","bash","swift","kotlin",
+        "microservices","restful","graphql","redis","elasticsearch","rabbitmq",
     ]
     jd_lower = jd_text.lower()
     found = [s for s in DOMAIN_SKILLS if s in jd_lower]
-    # Also grab meaningful tokens
-    for t in re.findall(r"\b([a-zA-Z][a-zA-Z0-9+#.\-]{2,})\b", jd_text):
-        tl = t.lower()
-        if tl not in found and len(tl) > 3:
-            found.append(tl)
-    return list(dict.fromkeys(found))[:50]
+    return list(dict.fromkeys(found))[:30]
 
 
 # ── SCORING (mirrors calculateScore exactly) ─────────────────────────────────
@@ -601,3 +617,44 @@ async def export_session(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=candidatelens_{session_id}.xlsx"},
     )
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_session(
+    session_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a CandidateLens session and all its candidates."""
+    from sqlalchemy import delete as sql_delete
+    result = await db.execute(
+        select(JobLensSession).where(
+            JobLensSession.id == session_id,
+            JobLensSession.user_id == current_user.id,
+        )
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(404, "Session not found")
+    await db.execute(sql_delete(JobLensCandidate).where(JobLensCandidate.session_id == session_id))
+    await db.delete(session)
+    await db.commit()
+    return {"message": "Deleted"}
+
+
+@router.delete("/sessions")
+async def delete_all_sessions(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete ALL sessions for the current user."""
+    from sqlalchemy import delete as sql_delete
+    ids_r = await db.execute(
+        select(JobLensSession.id).where(JobLensSession.user_id == current_user.id)
+    )
+    ids = [r[0] for r in ids_r.all()]
+    if ids:
+        await db.execute(sql_delete(JobLensCandidate).where(JobLensCandidate.session_id.in_(ids)))
+        await db.execute(sql_delete(JobLensSession).where(JobLensSession.user_id == current_user.id))
+        await db.commit()
+    return {"message": f"Deleted {len(ids)} sessions"}

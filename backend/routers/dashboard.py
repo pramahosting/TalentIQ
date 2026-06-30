@@ -1,6 +1,7 @@
 """
 TalentIQ – Dashboard Router
-Aggregates stats across JobHunt, JobIntel, LinkLens for the user dashboard.
+Aggregates stats across all 5 modules: JobHunter, MarketIntel, LinkExplore,
+CVAnalysis (session-only, no DB), and CandidateLens — for the user dashboard.
 """
 
 from fastapi import APIRouter, Depends
@@ -9,8 +10,8 @@ from sqlalchemy import select, func
 
 from db.database import get_db
 from models.models import (
-    User, JobSearch, Job, JobMatch, JobIntelRun,
-    LinkLensSearch, LinkedInProfile, AuditLog,
+    User, JobSearch, Job, JobMatch, JobIntelRun, JobIntelRecord,
+    LinkLensSearch, LinkedInProfile, JobLensSession, JobLensCandidate,
 )
 from schemas.schemas import DashboardStats
 from utils.auth_utils import get_current_user
@@ -25,13 +26,15 @@ async def get_dashboard_stats(
 ):
     uid = current_user.id
 
+    # ── JobHunter ──────────────────────────────────────────────────────
     total_searches = (await db.execute(
         select(func.count()).select_from(JobSearch).where(JobSearch.user_id == uid)
     )).scalar() or 0
 
     total_jobs = (await db.execute(
         select(func.count()).select_from(Job)
-        .join(JobSearch).where(JobSearch.user_id == uid)
+        .join(JobSearch, Job.search_id == JobSearch.id)
+        .where(JobSearch.user_id == uid)
     )).scalar() or 0
 
     total_matches = (await db.execute(
@@ -41,31 +44,50 @@ async def get_dashboard_stats(
     avg_score_result = (await db.execute(
         select(func.avg(JobMatch.ats_score)).where(JobMatch.user_id == uid)
     )).scalar()
-    avg_ats = round(avg_score_result or 0, 1)
+    avg_ats = round(float(avg_score_result), 1) if avg_score_result is not None else 0.0
 
+    # ── MarketIntel ────────────────────────────────────────────────────
     total_intel = (await db.execute(
         select(func.count()).select_from(JobIntelRun).where(JobIntelRun.user_id == uid)
     )).scalar() or 0
 
+    total_intel_jobs = (await db.execute(
+        select(func.count()).select_from(JobIntelRecord)
+        .join(JobIntelRun, JobIntelRecord.run_id == JobIntelRun.id)
+        .where(JobIntelRun.user_id == uid)
+    )).scalar() or 0
+
+    # ── LinkExplore ────────────────────────────────────────────────────
     total_ll_searches = (await db.execute(
         select(func.count()).select_from(LinkLensSearch).where(LinkLensSearch.user_id == uid)
     )).scalar() or 0
 
     total_profiles = (await db.execute(
         select(func.count()).select_from(LinkedInProfile)
-        .join(LinkLensSearch).where(LinkLensSearch.user_id == uid)
+        .join(LinkLensSearch, LinkedInProfile.search_id == LinkLensSearch.id)
+        .where(LinkLensSearch.user_id == uid)
     )).scalar() or 0
 
-    # Recent audit log
-    recent_result = await db.execute(
-        select(AuditLog)
-        .where(AuditLog.user_id == uid)
-        .order_by(AuditLog.created_at.desc()).limit(10)
+    # ── CandidateLens ──────────────────────────────────────────────────
+    total_joblens_sessions = (await db.execute(
+        select(func.count()).select_from(JobLensSession).where(JobLensSession.user_id == uid)
+    )).scalar() or 0
+
+    total_candidates = (await db.execute(
+        select(func.count()).select_from(JobLensCandidate)
+        .join(JobLensSession, JobLensCandidate.session_id == JobLensSession.id)
+        .where(JobLensSession.user_id == uid)
+    )).scalar() or 0
+
+    avg_candidate_score_result = (await db.execute(
+        select(func.avg(JobLensCandidate.ats_score))
+        .join(JobLensSession, JobLensCandidate.session_id == JobLensSession.id)
+        .where(JobLensSession.user_id == uid)
+    )).scalar()
+    avg_candidate_score = (
+        round(float(avg_candidate_score_result), 1)
+        if avg_candidate_score_result is not None else 0.0
     )
-    recent = [
-        {"action": a.action, "resource": a.resource, "created_at": a.created_at.isoformat()}
-        for a in recent_result.scalars().all()
-    ]
 
     return DashboardStats(
         total_job_searches=total_searches,
@@ -73,7 +95,11 @@ async def get_dashboard_stats(
         total_matches=total_matches,
         avg_ats_score=avg_ats,
         total_intel_runs=total_intel,
+        total_intel_jobs=total_intel_jobs,
         total_linkedin_searches=total_ll_searches,
         total_profiles_found=total_profiles,
-        recent_activity=recent,
+        total_joblens_sessions=total_joblens_sessions,
+        total_candidates=total_candidates,
+        avg_candidate_score=avg_candidate_score,
+        recent_activity=[],
     )
