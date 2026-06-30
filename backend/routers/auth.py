@@ -58,6 +58,8 @@ async def register(payload: UserRegister, request: Request, db: AsyncSession = D
         resource="user",
         ip_address=request.client.host if request.client else None,
     ))
+    await db.commit()
+    await db.refresh(user)
 
     return TokenOut(access_token=token, user=UserOut.model_validate(user))
 
@@ -83,6 +85,8 @@ async def login(payload: UserLogin, request: Request, db: AsyncSession = Depends
         resource="user",
         ip_address=request.client.host if request.client else None,
     ))
+    await db.commit()
+    await db.refresh(user)
 
     return TokenOut(access_token=token, user=UserOut.model_validate(user))
 
