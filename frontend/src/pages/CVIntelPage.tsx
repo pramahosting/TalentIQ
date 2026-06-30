@@ -1,8 +1,8 @@
 import { useState, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { } from "react-router-dom";
 import {
   BrainCircuit, FileText, Target, CheckCircle, AlertTriangle,
-  TrendingUp, Upload, X, Sparkles, ChevronDown, ChevronUp, Home,
+  TrendingUp, Upload, X, Sparkles, ChevronDown, ChevronUp,
   User, MapPin, Briefcase, List,
 } from "lucide-react";
 import { api } from "../lib/api";
@@ -167,9 +167,7 @@ function parseJDInfo(text: string, filename: string) {
 
 // ── Main page ────────────────────────────────────────────────────────────────
 export default function CVAnalysisPage() {
-  const navigate = useNavigate();
-
-  const [resumeText, setResumeText] = useState("");
+    const [resumeText, setResumeText] = useState("");
   const [resumeFile, setResumeFile] = useState<File | null>(null);
   const [extractedResumeText, setExtractedResumeText] = useState("");
 
@@ -179,6 +177,10 @@ export default function CVAnalysisPage() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState("");
+  const [history, setHistory] = useState<Array<{id: number; name: string; score: number; result: AnalysisResult; ts: string}>>(() => {
+    try { return JSON.parse(localStorage.getItem("cvintel_history") || "[]"); } catch { return []; }
+  });
+  const [selectedHistId, setSelectedHistId] = useState<number | null>(null);
 
   // candidate + JD info extracted after analysis
   const [candidateInfo, setCandidateInfo] = useState<any>(null);
@@ -199,6 +201,20 @@ export default function CVAnalysisPage() {
         headers: { "Content-Type": "multipart/form-data" },
       });
       setResult(res.data);
+      // Save to session history
+      const entry = {
+        id: Date.now(),
+        name: resumeFile?.name || "Resume",
+        score: res.data.overallScore,
+        result: res.data,
+        ts: new Date().toLocaleString(),
+      };
+      setHistory(prev => {
+        const updated = [entry, ...prev].slice(0, 20); // keep last 20
+        localStorage.setItem("cvintel_history", JSON.stringify(updated));
+        return updated;
+      });
+      setSelectedHistId(entry.id);
       // Parse info for summary cards
       const rText = resumeText || extractedResumeText;
       const jText = jdText;
@@ -230,10 +246,6 @@ export default function CVAnalysisPage() {
           </h1>
           <p className="tiq-page-sub">Score your resume against any job description</p>
         </div>
-        <button onClick={() => navigate("/")} className="tiq-btn tiq-btn-ghost tiq-btn-sm"
-          style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <Home size={14} /> Home
-        </button>
       </div>
 
       {error && <div className="tiq-alert tiq-alert-error tiq-mb-4">{error}</div>}
@@ -285,6 +297,46 @@ export default function CVAnalysisPage() {
           </div>
         )}
       </div>
+
+      {/* ── Session History ── */}
+      {history.length > 0 && (
+        <div className="tiq-card tiq-mb-4">
+          <div className="tiq-card-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <BrainCircuit size={14} color="var(--violet-500)" /> Past Analyses ({history.length})
+            </span>
+            <button onClick={() => { if(confirm("Clear all history?")) { setHistory([]); localStorage.removeItem("cvintel_history"); setResult(null); }}}
+              style={{ background:"none",border:"none",cursor:"pointer",fontSize:11,color:"var(--rose-500)",display:"flex",alignItems:"center",gap:4 }}>
+              <X size={11} /> Clear all
+            </button>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {history.map(h => (
+              <button key={h.id}
+                onClick={() => { setResult(h.result); setSelectedHistId(h.id); }}
+                style={{
+                  padding: "6px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                  background: selectedHistId === h.id ? "rgba(139,92,246,.12)" : "var(--bg-secondary)",
+                  border: selectedHistId === h.id ? "1.5px solid var(--violet-500)" : "1.5px solid var(--border)",
+                  color: selectedHistId === h.id ? "var(--violet-500)" : "var(--text-secondary)",
+                  display: "flex", alignItems: "center", gap: 6,
+                }}>
+                <span>{h.name}</span>
+                <span style={{ padding: "1px 6px", borderRadius: 4, fontSize: 10,
+                  background: h.score >= 75 ? "#10b98120" : h.score >= 50 ? "#f59e0b20" : "#ef444420",
+                  color: h.score >= 75 ? "#10b981" : h.score >= 50 ? "#f59e0b" : "#ef4444" }}>
+                  {h.score}%
+                </span>
+                <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{h.ts}</span>
+                <span onClick={e => { e.stopPropagation(); const updated = history.filter(x => x.id !== h.id); setHistory(updated); localStorage.setItem("cvintel_history", JSON.stringify(updated)); if(selectedHistId === h.id) setResult(null); }}
+                  style={{ color: "var(--text-muted)", cursor: "pointer", display: "flex" }}>
+                  <X size={10} />
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* ── Results ── */}
       {result && (

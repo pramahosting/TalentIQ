@@ -1,15 +1,15 @@
-import { useNavigate } from "react-router-dom";
+import { } from "react-router-dom";
 import { useState, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Users, Upload, FileText, Play, Download, ChevronDown, ChevronUp,
   CheckCircle, Clock, XCircle, Star, Video, RefreshCw, Sparkles, BarChart2,
-  Home,
-} from "lucide-react";
+  Trash2 } from "lucide-react";
 import { api } from "../lib/api";
 
 // ─── API ───────────────────────────────────────────────────────────────────
 const jobLensApi = {
+  deleteSession: (id: number) => api.delete(`/api/joblens/sessions/${id}`).then(r => r.data),
   run: (form: FormData) => api.post("/api/joblens/run", form, {
     headers: { "Content-Type": "multipart/form-data" },
   }).then(r => r.data),
@@ -333,8 +333,7 @@ function CandidateRow({
 
 // ─── MAIN PAGE ─────────────────────────────────────────────────────────────
 export default function JobLensPage() {
-  const navigate = useNavigate();
-  const qc = useQueryClient();
+    const qc = useQueryClient();
   const [jdText, setJdText] = useState("");
   const [jdFile, setJdFile] = useState<File | null>(null);
   const [cvFiles, setCvFiles] = useState<FileList | null>(null);
@@ -344,6 +343,14 @@ export default function JobLensPage() {
   const [tab, setTab] = useState<"new"|"history">("new");
   const jdFileRef = useRef<HTMLInputElement>(null);
   const cvFileRef = useRef<HTMLInputElement>(null);
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => jobLensApi.deleteSession(id),
+    onSuccess: (_, id) => {
+      qc.invalidateQueries({ queryKey: ["joblens-sessions"] });
+      if (activeSessionId === id) setActiveSessionId(null);
+    },
+  });
 
   const { data: sessions = [] } = useQuery({
     queryKey: ["joblens-sessions"],
@@ -397,10 +404,6 @@ export default function JobLensPage() {
         </h1>
         <p className="tiq-page-sub">AI recruitment engine — rank CVs, score candidates, run video interviews</p>
       </div>
-      <button onClick={() => navigate("/")} className="tiq-btn tiq-btn-ghost tiq-btn-sm"
-        style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, alignSelf: "flex-start" }}>
-        <Home size={14} /> Home
-      </button>
 
       <div className="tiq-tabs">
         <button className={`tiq-tab${tab === "new" ? " active" : ""}`} onClick={() => setTab("new")}>
@@ -527,8 +530,15 @@ export default function JobLensPage() {
                   borderLeft: activeSessionId === s.id ? "3px solid var(--violet-500)" : "3px solid transparent",
                 }}>
                 <div style={{ fontSize: 12, fontWeight: 600 }}>Session #{s.id}</div>
-                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
-                  {s.cv_count} CVs · {new Date(s.created_at).toLocaleDateString()}
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2, display: "flex", gap: 8, alignItems: "center" }}>
+                  <span>{s.cv_count} CVs</span>
+                  <span>·</span>
+                  <span>{new Date(s.created_at).toLocaleDateString()}</span>
+                  <button
+                    onClick={e => { e.stopPropagation(); if (confirm("Delete this session?")) deleteMutation.mutate(s.id); }}
+                    style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", display: "flex", padding: 2 }}>
+                    <Trash2 size={11} />
+                  </button>
                 </div>
                 <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {s.jd_preview}
@@ -562,15 +572,55 @@ export default function JobLensPage() {
                 </div>
               )}
 
-              {/* JD Skills */}
-              {(activeSession.jd_skills || []).length > 0 && (
-                <div className="tiq-card tiq-mb-4">
-                  <div className="tiq-card-title" style={{ fontSize: 12, marginBottom: 8 }}>Extracted JD Skills</div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                    {(activeSession.jd_skills || []).slice(0, 30).map((s: string) => (
-                      <span key={s} className="tiq-badge tiq-badge-violet" style={{ fontSize: 10 }}>{s}</span>
-                    ))}
-                  </div>
+              {/* JD Summary */}
+              {activeSession.jd_text && (
+                <div className="tiq-card tiq-mb-4" style={{ borderLeft: "4px solid var(--violet-500)" }}>
+                  <div className="tiq-card-title" style={{ fontSize: 12, marginBottom: 12 }}>Job Description Summary</div>
+                  {(() => {
+                    const jd = activeSession.jd_text || "";
+                    // Extract role — first meaningful line
+                    const lines = jd.split("\n").map((l: string) => l.trim()).filter(Boolean);
+                    const roleMatch = jd.match(/(?:job\s*title|role|position)\s*[:\-]\s*(.+)/i);
+                    const role = roleMatch ? roleMatch[1].trim() : lines[0]?.slice(0, 80);
+                    // Extract location
+                    const locMatch = jd.match(/(?:location|based\s*in|located\s*in)\s*[:\-]\s*(.+)/i);
+                    const location = locMatch ? locMatch[1].trim().split("\n")[0] : "";
+                    // Extract company
+                    const compMatch = jd.match(/(?:company|organisation|employer|about\s+us)\s*[:\-]\s*(.+)/i);
+                    const company = compMatch ? compMatch[1].trim().split("\n")[0] : "";
+                    return (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        {role && (
+                          <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                            <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", width: 60, flexShrink: 0 }}>ROLE</span>
+                            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{role}</span>
+                          </div>
+                        )}
+                        {location && (
+                          <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                            <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", width: 60, flexShrink: 0 }}>LOCATION</span>
+                            <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{location}</span>
+                          </div>
+                        )}
+                        {company && (
+                          <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                            <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", width: 60, flexShrink: 0 }}>COMPANY</span>
+                            <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{company}</span>
+                          </div>
+                        )}
+                        {(activeSession.jd_skills || []).length > 0 && (
+                          <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                            <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", width: 60, flexShrink: 0, paddingTop: 2 }}>SKILLS</span>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                              {(activeSession.jd_skills || []).slice(0, 25).map((s: string) => (
+                                <span key={s} className="tiq-badge tiq-badge-violet" style={{ fontSize: 10 }}>{s}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 

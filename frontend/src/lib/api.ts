@@ -46,6 +46,8 @@ export const jobhuntApi = {
   listResumes: () => api.get("/api/jobhunt/resumes").then((r) => r.data),
   searchJobs: (data: any) => api.post("/api/jobhunt/search", data).then((r) => r.data),
   listSearches: () => api.get("/api/jobhunt/searches").then((r) => r.data),
+  deleteSearch: (id: number) => api.delete(`/api/jobhunt/searches/${id}`).then((r) => r.data),
+  deleteAllSearches: () => api.delete("/api/jobhunt/searches").then((r) => r.data),
   matchResume: (data: any) => api.post("/api/jobhunt/match", data).then((r) => r.data),
   listMatches: () => api.get("/api/jobhunt/matches").then((r) => r.data),
   exportExcel: (searchId: number) =>
@@ -57,6 +59,8 @@ export const jobintelApi = {
   listRuns: () => api.get("/api/jobintel/runs").then((r) => r.data),
   getRun: (id: number) => api.get(`/api/jobintel/runs/${id}`).then((r) => r.data),
   getRunRecords: (id: number) => api.get(`/api/jobintel/runs/${id}/records`).then((r) => r.data),
+  deleteRun: (id: number) => api.delete(`/api/jobintel/runs/${id}`).then((r) => r.data),
+  deleteAllRuns: () => api.delete("/api/jobintel/runs").then((r) => r.data),
 };
 
 export const linklensApi = {
@@ -64,6 +68,7 @@ export const linklensApi = {
   listSearches: () => api.get("/api/linklens/searches").then((r) => r.data),
   getSearch: (id: number) => api.get(`/api/linklens/searches/${id}`).then((r) => r.data),
   deleteSearch: (id: number) => api.delete(`/api/linklens/searches/${id}`).then((r) => r.data),
+  deleteAllSearches: () => api.delete("/api/linklens/searches").then(r => r.data),
   exportProfiles: (id: number) =>
     api.get(`/api/linklens/searches/${id}/export`, { responseType: "blob" }).then((r) => r.data),
 };
@@ -80,3 +85,8 @@ export function downloadBlob(blob: Blob, filename: string) {
   a.click();
   URL.revokeObjectURL(url);
 }
+
+export const joblensApi = {
+  deleteSession: (id: number) => api.delete(`/api/joblens/sessions/${id}`).then(r => r.data),
+  deleteAllSessions: () => api.delete("/api/joblens/sessions").then(r => r.data),
+};

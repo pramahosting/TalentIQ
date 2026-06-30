@@ -10,7 +10,11 @@ const STAT_CARDS = [
   { key: "total_matches", label: "Resume Matches", icon: Target, color: "#8b5cf6", bg: "rgba(139,92,246,.1)" },
   { key: "avg_ats_score", label: "Avg ATS Score", icon: Star, color: "#f59e0b", bg: "rgba(245,158,11,.1)", suffix: "%" },
   { key: "total_intel_runs", label: "Intel Runs", icon: BarChart2, color: "#ec4899", bg: "rgba(236,72,153,.1)" },
+  { key: "total_intel_jobs", label: "Market Jobs Analysed", icon: BarChart2, color: "#ec4899", bg: "rgba(236,72,153,.1)" },
+  { key: "total_linkedin_searches", label: "LinkedIn Searches", icon: Users, color: "#10b981", bg: "rgba(16,185,129,.1)" },
   { key: "total_profiles_found", label: "Profiles Found", icon: Users, color: "#10b981", bg: "rgba(16,185,129,.1)" },
+  { key: "total_joblens_sessions", label: "CandidateLens Sessions", icon: Briefcase, color: "#f43f5e", bg: "rgba(244,63,94,.1)" },
+  { key: "total_candidates", label: "Candidates Scored", icon: Target, color: "#f43f5e", bg: "rgba(244,63,94,.1)" },
 ];
 
 export default function DashboardPage() {
@@ -46,7 +50,7 @@ export default function DashboardPage() {
       </div>
 
       {/* QUICK ACTIONS */}
-      <div className="tiq-grid-3 tiq-mb-6">
+      <div className="tiq-grid-3 tiq-mb-6" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
         {[
           {
             to: "/app/jobhunt",
@@ -71,6 +75,22 @@ export default function DashboardPage() {
             desc: "Search LinkedIn at scale, extract profiles, and export to spreadsheet.",
             color: "#f59e0b",
             bg: "rgba(245,158,11,.08)",
+          },
+          {
+            to: "/app/cvintel",
+            icon: <Target size={20} color="#3b82f6" />,
+            title: "Analyse your CV",
+            desc: "Score your resume against any job description, get matched and missing skills.",
+            color: "#3b82f6",
+            bg: "rgba(59,130,246,.08)",
+          },
+          {
+            to: "/app/joblens",
+            icon: <Briefcase size={20} color="#f43f5e" />,
+            title: "Rank candidates",
+            desc: "Upload a JD and multiple CVs, get AI-ranked candidates and interview questions.",
+            color: "#f43f5e",
+            bg: "rgba(244,63,94,.08)",
           },
         ].map((item) => (
           <Link to={item.to} key={item.to} style={{ textDecoration: "none" }}>

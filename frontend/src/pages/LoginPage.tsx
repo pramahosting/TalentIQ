@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Eye, EyeOff, Mail, Lock, ArrowRight } from "lucide-react";
+import { Eye, EyeOff, Mail, Lock, ArrowRight, Home } from "lucide-react";
 import { useAuth } from "../hooks/useAuth";
 import { api } from "../lib/api";
 
@@ -90,16 +90,22 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="tiq-auth-wrap">
+    <div className="tiq-auth-wrap" style={{ position: "relative" }}>
+      <Link to="/" style={{
+        position: "absolute", top: 20, right: 20,
+        display: "inline-flex", alignItems: "center", gap: 5,
+        fontSize: 12, fontWeight: 600, color: "var(--text-muted)",
+        textDecoration: "none", padding: "6px 12px", borderRadius: 6,
+        border: "1px solid var(--border)",
+      }}
+        onMouseEnter={e => { e.currentTarget.style.color = "var(--text-primary)"; e.currentTarget.style.background = "var(--bg-secondary)"; }}
+        onMouseLeave={e => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "transparent"; }}>
+        <Home size={12} /> Home
+      </Link>
       <div className="tiq-auth-card">
         <div className="tiq-logo-wordmark" style={{ fontSize: 20, marginBottom: 24 }}>TalentIQ</div>
         <h1 className="tiq-auth-title">Welcome back</h1>
         <p className="tiq-auth-sub">Sign in with your email address</p>
-
-        <div style={{ marginBottom: 16, padding: "10px 14px", background: "rgba(0,199,183,.06)",
-          border: "1px solid rgba(0,199,183,.2)", borderRadius: 8, fontSize: 12 }}>
-          <strong>Admin:</strong> admin@talentiq.ai &nbsp;/&nbsp; Talent@1
-        </div>
 
         {error && <div className="tiq-alert tiq-alert-error">{error}</div>}
 

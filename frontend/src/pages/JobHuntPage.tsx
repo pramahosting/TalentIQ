@@ -1,11 +1,10 @@
-import { useNavigate } from "react-router-dom";
+import { } from "react-router-dom";
 import { useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Upload, Search, Target, Download, ExternalLink, ChevronDown, ChevronUp, FileText , Home} from "lucide-react";
+import { Upload, Search, Target, Download, ExternalLink, ChevronDown, ChevronUp, FileText, Trash2 } from "lucide-react";
 import { jobhuntApi, downloadBlob } from "../lib/api";
 
 export default function JobHunterPage() {
-  const navigate = useNavigate();
   const qc = useQueryClient();
   const [tab, setTab] = useState<"search" | "matches">("search");
   const [expandedJob, setExpandedJob] = useState<number | null>(null);
@@ -43,6 +42,16 @@ export default function JobHunterPage() {
   });
 
   // Match
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => jobhuntApi.deleteSearch(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["searches"] }),
+  });
+
+  const deleteAllMutation = useMutation({
+    mutationFn: () => jobhuntApi.deleteAllSearches(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["searches"] }),
+  });
+
   const matchMutation = useMutation({
     mutationFn: () => jobhuntApi.matchResume({ resume_id: selectedResumeId!, search_id: currentSearch!.id }),
     onSuccess: () => {
@@ -101,7 +110,7 @@ export default function JobHunterPage() {
                   <option value="">Select a resume</option>
                   {resumes.map((r: any) => (
                     <option key={r.id} value={r.id}>
-                      {r.applicant_name || r.filename} — {new Date(r.uploaded_at).toLocaleDateString()}
+                      {r.filename}
                     </option>
                   ))}
                 </select>
@@ -200,12 +209,22 @@ export default function JobHunterPage() {
             </div>
             {searchMutation.isError && (
               <div className="tiq-alert tiq-alert-error" style={{ marginTop: 12 }}>
-                Search failed. Check your API keys in Settings.
+                Search failed: {(searchMutation.error as any)?.response?.data?.detail || (searchMutation.error as any)?.message || "Unknown error. Check the backend logs."}
+              </div>
+            )}
+            {uploadMutation.isError && (
+              <div className="tiq-alert tiq-alert-error" style={{ marginTop: 12 }}>
+                Resume upload failed: {(uploadMutation.error as any)?.response?.data?.detail || (uploadMutation.error as any)?.message || "Unsupported file type or server error."}
               </div>
             )}
           </div>
 
           {/* JOB RESULTS */}
+          {currentSearch?.notice && (
+            <div className="tiq-alert tiq-alert-warning" style={{ marginBottom: 12 }}>
+              {currentSearch.notice}
+            </div>
+          )}
           {jobs.length > 0 && (
             <div className="tiq-card">
               <div className="tiq-card-title">
