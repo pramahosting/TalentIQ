@@ -1,9 +1,14 @@
 """
 TalentIQ Platform - FastAPI Backend
+Serves React frontend from /static in production (Docker/Northflank).
 """
 import sys
-from fastapi import FastAPI
+import os
+from pathlib import Path
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 from sqlalchemy import text
 
@@ -20,7 +25,6 @@ from routers import joblens as joblens_router
 async def lifespan(app: FastAPI):
     print("  Running DB migrations...")
     try:
-        # Fix any ENUM columns from old schema
         from db.migrate_fix import run as run_migrations
         await run_migrations()
     except Exception as e:
@@ -38,7 +42,13 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="TalentIQ API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="TalentIQ API",
+    version="1.0.0",
+    lifespan=lifespan,
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -48,6 +58,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── API Routes ───────────────────────────────────────────────────────
 app.include_router(auth.router,           prefix="/api/auth",      tags=["Auth"])
 app.include_router(jobhunt.router,        prefix="/api/jobhunt",   tags=["JobHunt"])
 app.include_router(jobintel.router,       prefix="/api/jobintel",  tags=["JobIntel"])
@@ -55,12 +66,7 @@ app.include_router(linklens.router,       prefix="/api/linklens",  tags=["LinkLe
 app.include_router(dashboard.router,      prefix="/api/dashboard", tags=["Dashboard"])
 app.include_router(admin_router.router,   prefix="/api/admin",     tags=["Admin"])
 app.include_router(cvintel_router.router, prefix="/api/cvintel",   tags=["CVIntel"])
-app.include_router(joblens_router.router,  prefix="/api/joblens",   tags=["JobLens"])
-
-
-@app.get("/")
-async def root():
-    return {"status": "TalentIQ API running"}
+app.include_router(joblens_router.router, prefix="/api/joblens",   tags=["JobLens"])
 
 
 @app.get("/health")
@@ -72,3 +78,33 @@ async def health():
     except Exception as e:
         db = f"error: {str(e)[:80]}"
     return {"status": "healthy", "database": db}
+
+
+# ── Serve React frontend (production/Docker only) ────────────────────
+# In dev: Vite runs on :5173 and proxies /api → :8000
+# In prod: FastAPI serves the built React app from /static
+STATIC_DIR = Path(__file__).parent / "static"
+
+if STATIC_DIR.exists():
+    # Serve static assets (JS, CSS, images) under /assets
+    app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon():
+        f = STATIC_DIR / "favicon.ico"
+        return FileResponse(str(f)) if f.exists() else FileResponse(str(STATIC_DIR / "index.html"))
+
+    # Catch-all: return index.html for all non-API routes
+    # This lets React Router handle /, /login, /app/jobhunt, etc.
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(request: Request, full_path: str):
+        if full_path.startswith("api/"):
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": "Not found"}, status_code=404)
+        index = STATIC_DIR / "index.html"
+        return FileResponse(str(index))
+else:
+    # Development mode — no static files built yet
+    @app.get("/")
+    async def root():
+        return {"status": "TalentIQ API running (dev mode — frontend on :5173)"}
