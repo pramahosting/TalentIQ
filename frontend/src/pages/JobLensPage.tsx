@@ -167,7 +167,10 @@ function VideoInterviewModal({
           surprise: Number(emo.surprise ?? emo.Surprise ?? 0),
           neutral:  Number(emo.neutral ?? emo.Neutral ?? 0),
         };
-        const [domKey] = Object.entries(vals).reduce((max, c) => (c[1] > max[1] ? c : max), ["neutral", 0]);
+        const [domKey] = Object.entries(vals).reduce(
+          (max, c) => (c[1] > max[1] ? c : max),
+          ["neutral", 0]
+        ) as [keyof EmotionAgg, number];
 
         setAgg(prev => {
           const updated = { ...prev, [domKey]: prev[domKey] + 1 } as EmotionAgg;
