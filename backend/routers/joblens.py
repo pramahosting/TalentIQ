@@ -126,46 +126,7 @@ def extract_candidate_info(text: str, filename: str) -> dict:
     if not name:
         name = Path(filename).stem.replace("_", " ").replace("-", " ").title()
 
-    # ── Experience years — look for explicit "X years" mentions ───────
-    exp_years = ""
-    exp_matches = re.findall(
-        r"(\d{1,2})\+?\s*(?:years?|yrs?)\s*(?:of\s+)?(?:experience|exp\b)",
-        text, re.IGNORECASE,
-    )
-    if exp_matches:
-        # Take the highest mentioned figure (usually the headline summary)
-        exp_years = f"{max(int(y) for y in exp_matches)}+ years"
-    else:
-        # Fallback: count distinct 4-digit years mentioned in work history
-        # to estimate a rough career span (e.g. 2009 ... 2024)
-        years_found = sorted(set(int(y) for y in re.findall(r"\b(19[7-9]\d|20[0-2]\d)\b", text)))
-        if len(years_found) >= 2:
-            span = years_found[-1] - years_found[0]
-            if 0 < span <= 45:
-                exp_years = f"~{span} years"
-
-    # ── Summary — first substantial paragraph (career objective / profile) ──
-    summary = ""
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
-    SUMMARY_SKIP = {"resume", "curriculum vitae", "cv", "page", "contact", "references"}
-    for p in paragraphs[:15]:
-        clean_p = re.sub(r"\s+", " ", p).strip()
-        low = clean_p.lower()
-        if len(clean_p) < 80 or len(clean_p) > 700:
-            continue
-        if any(s in low[:30] for s in SUMMARY_SKIP):
-            continue
-        if "@" in clean_p or re.search(r"^\s*[\u2022\-\*]", p):
-            continue
-        # Looks like prose (has multiple sentences / reasonable word count)
-        if len(clean_p.split()) >= 12:
-            summary = clean_p[:400]
-            break
-
-    return {
-        "name": name, "email": email, "phone": phone,
-        "experience_years": exp_years, "summary": summary,
-    }
+    return {"name": name, "email": email, "phone": phone}
 
 
 # ── SKILL EXTRACTION FROM JD (LLM) ──────────────────────────────────────────
@@ -313,8 +274,6 @@ def _fmt(c: JobLensCandidate) -> dict:
         "missing_skills": c.missing_skills or [],
         "bonus": c.bonus,
         "bonus_reasons": c.bonus_reasons,
-        "experience_years": c.experience_years or "",
-        "summary": c.summary or "",
         "video_status": c.video_status,
         "shortlisted": c.shortlisted,
         "interview_questions": c.interview_questions or [],
@@ -428,8 +387,6 @@ async def run_joblens(
                 missing_skills=result["gap"],
                 bonus=result["bonus"],
                 bonus_reasons=result["reasons"],
-                experience_years=info.get("experience_years", ""),
-                summary=info.get("summary", ""),
                 interview_questions=questions,
                 video_status="Pending",
                 shortlisted=False,
@@ -645,28 +602,26 @@ async def export_session(
     rows = []
     for i, c in enumerate(candidates, 1):
         rows.append({
-            "Rank":              i,
-            "Name":              c.name,
-            "Email":             c.email,
-            "Phone":             c.phone,
-            "Experience":        c.experience_years or "",
-            "ATS Score":         f"{c.ats_score:.1f}%",
-            "Key Strength":      ", ".join(c.matched_skills or []),
-            "Considerations":    ", ".join(c.missing_skills or []),
-            "Status":            c.status,
-            "Video Status":      c.video_status,
-            "Happy %":           c.emotion_happy or 0,
-            "Neutral %":         c.emotion_neutral or 0,
-            "Sad %":             c.emotion_sad or 0,
-            "Angry %":           c.emotion_angry or 0,
-            "Fear %":            c.emotion_fear or 0,
-            "Disgust %":         c.emotion_disgust or 0,
-            "Surprise %":        c.emotion_surprise or 0,
-            "Dominant Emotion":  c.dominant_emotion or "Neutral",
-            "Shortlisted":       "Yes" if c.shortlisted else "No",
-            "Bonus Points":      c.bonus,
-            "Bonus Reasons":     c.bonus_reasons,
-            "Summary":           c.summary or "",
+            "Rank":            i,
+            "Name":            c.name,
+            "Email":           c.email,
+            "Phone":           c.phone,
+            "ATS Score":       f"{c.ats_score:.1f}%",
+            "Status":          c.status,
+            "Matched Skills":  ", ".join(c.matched_skills or []),
+            "Missing Skills":  ", ".join(c.missing_skills or []),
+            "Bonus Points":    c.bonus,
+            "Bonus Reasons":   c.bonus_reasons,
+            "Video Status":    c.video_status,
+            "Happy %":         c.emotion_happy or 0,
+            "Neutral %":       c.emotion_neutral or 0,
+            "Sad %":           c.emotion_sad or 0,
+            "Angry %":         c.emotion_angry or 0,
+            "Fear %":          c.emotion_fear or 0,
+            "Disgust %":       c.emotion_disgust or 0,
+            "Surprise %":      c.emotion_surprise or 0,
+            "Dominant Emotion": c.dominant_emotion or "Neutral",
+            "Shortlisted":     "Yes" if c.shortlisted else "No",
         })
 
     buf = io.BytesIO()

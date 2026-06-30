@@ -46,6 +46,7 @@ app = FastAPI(
     title="TalentIQ API",
     version="1.0.0",
     lifespan=lifespan,
+    # Hide docs in production
     docs_url="/api/docs",
     redoc_url="/api/redoc",
 )
@@ -89,15 +90,17 @@ if STATIC_DIR.exists():
     # Serve static assets (JS, CSS, images) under /assets
     app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")
 
+    # Serve favicon and other root-level static files
     @app.get("/favicon.ico", include_in_schema=False)
     async def favicon():
         f = STATIC_DIR / "favicon.ico"
         return FileResponse(str(f)) if f.exists() else FileResponse(str(STATIC_DIR / "index.html"))
 
     # Catch-all: return index.html for all non-API routes
-    # This lets React Router handle /, /login, /app/jobhunt, etc.
+    # This lets React Router handle /login, /app/jobhunt, etc.
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(request: Request, full_path: str):
+        # Don't intercept API calls (shouldn't happen but safety net)
         if full_path.startswith("api/"):
             from fastapi.responses import JSONResponse
             return JSONResponse({"detail": "Not found"}, status_code=404)
