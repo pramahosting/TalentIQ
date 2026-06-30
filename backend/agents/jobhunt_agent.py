@@ -170,7 +170,10 @@ def parse_resume_text(text: str) -> Dict:
     applicant_name = lines[0] if lines else "Applicant"
 
     # Email
-    email_match = re.search(r"[\w.+-]+@[\w-]+\.[a-z]{2,}", text, re.IGNORECASE)
+    email_match = re.search(
+        r"[a-zA-Z][\w.+-]*@[\w-]+\.(com|net|org|edu|gov|io|co|au|uk|in|nz|ca|us|biz|info|me)\b",
+        text, re.IGNORECASE,
+    )
     email = email_match.group() if email_match else None
 
     # Skills detection (simple keyword matching)

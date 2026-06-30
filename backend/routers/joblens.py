@@ -56,7 +56,30 @@ def extract_text(content: bytes, filename: str) -> str:
         try:
             import docx
             doc = docx.Document(io.BytesIO(content))
-            parts = [p.text for p in doc.paragraphs if p.text.strip()]
+
+            # Headers often contain name/email/phone (especially in resumes
+            # with a banner/letterhead layout). python-docx's section.header
+            # only exposes ONE header per section by default, but a docx can
+            # have up to 3 per section (default/first-page/even-page) stored
+            # as header1.xml/header2.xml/header3.xml — read them all via the
+            # raw XML so we never miss contact details placed there.
+            header_footer_parts = []
+            try:
+                import re as _re2
+                import zipfile as _zipfile
+                with _zipfile.ZipFile(io.BytesIO(content)) as z:
+                    for name in z.namelist():
+                        if _re2.match(r"word/(header|footer)\d*\.xml$", name):
+                            xml = z.read(name).decode("utf-8", errors="ignore")
+                            texts = _re2.findall(r"<w:t[^>]*>([^<]*)</w:t>", xml)
+                            joined = "".join(texts).strip()
+                            if joined:
+                                header_footer_parts.append(joined)
+            except Exception:
+                pass
+
+            parts = list(header_footer_parts)  # put header/footer text first
+            parts += [p.text for p in doc.paragraphs if p.text.strip()]
             for table in doc.tables:
                 for row in table.rows:
                     for cell in row.cells:
@@ -98,8 +121,17 @@ def extract_text(content: bytes, filename: str) -> str:
 
 def extract_candidate_info(text: str, filename: str) -> dict:
     """Extract name, email, phone — mirrors original extractCandidateDetails."""
+    # Word documents with letterhead-style headers often have run-together
+    # text with no whitespace between fields (Word renders separate <w:t>
+    # runs with different formatting as visually adjacent but textually
+    # concatenated), e.g. "NSW 2145resume2@gmail.comLinkedIn:". Insert a
+    # space at lowercase→uppercase and digit→letter transitions so regexes
+    # below can find clean boundaries — this never touches genuine words.
+    norm_text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+    norm_text = re.sub(r'(\d)([a-zA-Z])', r'\1 \2', norm_text)
+
     # Email
-    email_m = re.search(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,6}", text)
+    email_m = re.search(r"[a-zA-Z][\w.+-]*@[\w.-]+\.[a-zA-Z]{2,6}", norm_text)
     email = email_m.group() if email_m else ""
 
     # Phone — original regex: (+?\d{1,4}[\s-]?\(?\d{1,4}\)?[\s-]?\d{3,4}[\s-]?\d{3,4})
@@ -111,11 +143,20 @@ def extract_candidate_info(text: str, filename: str) -> dict:
 
     # Name — mirrors original: first non-email, non-4digit, <=5 word line
     name = ""
+    NAME_SKIP_PATTERNS = (
+        r"^page\s+\d+\s*(of\s+\d+)?$",
+        r"^\d+\s*$",
+        r"^confidential$",
+        r"^curriculum vitae$",
+        r"^resume$",
+    )
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     for line in lines[:25]:
         if "@" in line:
             continue
         if re.search(r"\d{4,}", line):
+            continue
+        if any(re.match(p, line, re.IGNORECASE) for p in NAME_SKIP_PATTERNS):
             continue
         if len(line.split()) <= 5 and len(line) > 2:
             candidate = re.sub(r"[^a-zA-Z\s\-\.]", "", line).strip()
@@ -126,7 +167,46 @@ def extract_candidate_info(text: str, filename: str) -> dict:
     if not name:
         name = Path(filename).stem.replace("_", " ").replace("-", " ").title()
 
-    return {"name": name, "email": email, "phone": phone}
+    # ── Experience years — look for explicit "X years" mentions ───────
+    exp_years = ""
+    exp_matches = re.findall(
+        r"(\d{1,2})\+?\s*(?:years?|yrs?)\s*(?:of\s+)?(?:experience|exp\b)",
+        text, re.IGNORECASE,
+    )
+    if exp_matches:
+        # Take the highest mentioned figure (usually the headline summary)
+        exp_years = f"{max(int(y) for y in exp_matches)}+ years"
+    else:
+        # Fallback: count distinct 4-digit years mentioned in work history
+        # to estimate a rough career span (e.g. 2009 ... 2024)
+        years_found = sorted(set(int(y) for y in re.findall(r"\b(19[7-9]\d|20[0-2]\d)\b", text)))
+        if len(years_found) >= 2:
+            span = years_found[-1] - years_found[0]
+            if 0 < span <= 45:
+                exp_years = f"~{span} years"
+
+    # ── Summary — first substantial paragraph (career objective / profile) ──
+    summary = ""
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    SUMMARY_SKIP = {"resume", "curriculum vitae", "cv", "page", "contact", "references"}
+    for p in paragraphs[:15]:
+        clean_p = re.sub(r"\s+", " ", p).strip()
+        low = clean_p.lower()
+        if len(clean_p) < 80 or len(clean_p) > 700:
+            continue
+        if any(s in low[:30] for s in SUMMARY_SKIP):
+            continue
+        if "@" in clean_p or re.search(r"^\s*[\u2022\-\*]", p):
+            continue
+        # Looks like prose (has multiple sentences / reasonable word count)
+        if len(clean_p.split()) >= 12:
+            summary = clean_p[:400]
+            break
+
+    return {
+        "name": name, "email": email, "phone": phone,
+        "experience_years": exp_years, "summary": summary,
+    }
 
 
 # ── SKILL EXTRACTION FROM JD (LLM) ──────────────────────────────────────────
@@ -274,6 +354,8 @@ def _fmt(c: JobLensCandidate) -> dict:
         "missing_skills": c.missing_skills or [],
         "bonus": c.bonus,
         "bonus_reasons": c.bonus_reasons,
+        "experience_years": c.experience_years or "",
+        "summary": c.summary or "",
         "video_status": c.video_status,
         "shortlisted": c.shortlisted,
         "interview_questions": c.interview_questions or [],
@@ -387,6 +469,8 @@ async def run_joblens(
                 missing_skills=result["gap"],
                 bonus=result["bonus"],
                 bonus_reasons=result["reasons"],
+                experience_years=info.get("experience_years", ""),
+                summary=info.get("summary", ""),
                 interview_questions=questions,
                 video_status="Pending",
                 shortlisted=False,
@@ -602,26 +686,28 @@ async def export_session(
     rows = []
     for i, c in enumerate(candidates, 1):
         rows.append({
-            "Rank":            i,
-            "Name":            c.name,
-            "Email":           c.email,
-            "Phone":           c.phone,
-            "ATS Score":       f"{c.ats_score:.1f}%",
-            "Status":          c.status,
-            "Matched Skills":  ", ".join(c.matched_skills or []),
-            "Missing Skills":  ", ".join(c.missing_skills or []),
-            "Bonus Points":    c.bonus,
-            "Bonus Reasons":   c.bonus_reasons,
-            "Video Status":    c.video_status,
-            "Happy %":         c.emotion_happy or 0,
-            "Neutral %":       c.emotion_neutral or 0,
-            "Sad %":           c.emotion_sad or 0,
-            "Angry %":         c.emotion_angry or 0,
-            "Fear %":          c.emotion_fear or 0,
-            "Disgust %":       c.emotion_disgust or 0,
-            "Surprise %":      c.emotion_surprise or 0,
-            "Dominant Emotion": c.dominant_emotion or "Neutral",
-            "Shortlisted":     "Yes" if c.shortlisted else "No",
+            "Rank":              i,
+            "Name":              c.name,
+            "Email":             c.email,
+            "Phone":             c.phone,
+            "Experience":        c.experience_years or "",
+            "ATS Score":         f"{c.ats_score:.1f}%",
+            "Key Strength":      ", ".join(c.matched_skills or []),
+            "Considerations":    ", ".join(c.missing_skills or []),
+            "Status":            c.status,
+            "Video Status":      c.video_status,
+            "Happy %":           c.emotion_happy or 0,
+            "Neutral %":         c.emotion_neutral or 0,
+            "Sad %":             c.emotion_sad or 0,
+            "Angry %":           c.emotion_angry or 0,
+            "Fear %":            c.emotion_fear or 0,
+            "Disgust %":         c.emotion_disgust or 0,
+            "Surprise %":        c.emotion_surprise or 0,
+            "Dominant Emotion":  c.dominant_emotion or "Neutral",
+            "Shortlisted":       "Yes" if c.shortlisted else "No",
+            "Bonus Points":      c.bonus,
+            "Bonus Reasons":     c.bonus_reasons,
+            "Summary":           c.summary or "",
         })
 
     buf = io.BytesIO()

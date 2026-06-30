@@ -73,7 +73,27 @@ def _extract_text(content: bytes, filename: str) -> str:
         try:
             import docx
             doc = docx.Document(io.BytesIO(content))
-            paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+
+            # Headers can contain name/email/phone in letterhead-style resumes.
+            # python-docx's section.header only reads ONE header per section,
+            # but a docx can store up to 3 (header1/2/3.xml) — read all via XML.
+            header_footer_parts = []
+            try:
+                import re as _re2
+                import zipfile as _zipfile
+                with _zipfile.ZipFile(io.BytesIO(content)) as z:
+                    for name in z.namelist():
+                        if _re2.match(r"word/(header|footer)\d*\.xml$", name):
+                            xml = z.read(name).decode("utf-8", errors="ignore")
+                            texts = _re2.findall(r"<w:t[^>]*>([^<]*)</w:t>", xml)
+                            joined = "".join(texts).strip()
+                            if joined:
+                                header_footer_parts.append(joined)
+            except Exception:
+                pass
+
+            paragraphs = list(header_footer_parts)
+            paragraphs += [p.text for p in doc.paragraphs if p.text.strip()]
             # Also extract from tables
             for table in doc.tables:
                 for row in table.rows:
