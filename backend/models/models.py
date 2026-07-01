@@ -45,6 +45,7 @@ class User(Base):
     audit_logs        = relationship("AuditLog",        back_populates="user", cascade="all, delete-orphan")
     joblens_sessions  = relationship("JobLensSession",  back_populates="user", cascade="all, delete-orphan")
     jd_documents      = relationship("JDDocument",      back_populates="user", cascade="all, delete-orphan")
+    cvanalysis_records = relationship("CVAnalysisRecord", back_populates="user", cascade="all, delete-orphan")
 
 
 class UserAPIKey(Base):
@@ -351,3 +352,22 @@ class JDDocument(Base):
     created_at          = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="jd_documents")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CVANALYSIS
+# ══════════════════════════════════════════════════════════════════════════════
+
+class CVAnalysisRecord(Base):
+    __tablename__ = "tiq_cvanalysis_records"
+
+    id                = Column(Integer, primary_key=True, index=True)
+    user_id           = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
+    source_name       = Column(String(300))         # resume filename, or "Resume"
+    overall_score     = Column(Float, default=0.0)
+    result            = Column(JSON, default=dict)   # full AnalysisResult payload
+    candidate_info    = Column(JSON, default=dict)
+    jd_info           = Column(JSON, default=dict)
+    created_at        = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="cvanalysis_records")

@@ -7,12 +7,13 @@ import io
 import re
 import json
 from typing import Optional
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from db.database import get_db
-from models.models import User, UserAPIKey
+from models.models import User, UserAPIKey, CVAnalysisRecord
 from utils.auth_utils import get_current_user
 
 router = APIRouter()
@@ -351,3 +352,94 @@ async def analyze_resume(
         result["note"] = "Add a Groq API key in Settings for AI-powered analysis"
 
     return result
+
+
+# ── HISTORY (persisted server-side, so it survives browsers/devices/refresh) ──
+
+from pydantic import BaseModel
+
+
+class SaveHistoryRequest(BaseModel):
+    source_name: str = "Resume"
+    overall_score: float = 0
+    result: dict
+    candidate_info: dict = {}
+    jd_info: dict = {}
+
+
+def _fmt_history(r: CVAnalysisRecord) -> dict:
+    return {
+        "id": r.id,
+        "sourceName": r.source_name,
+        "overallScore": r.overall_score,
+        "result": r.result or {},
+        "candidateInfo": r.candidate_info or {},
+        "jdInfo": r.jd_info or {},
+        "createdAt": r.created_at.isoformat() if r.created_at else None,
+    }
+
+
+@router.post("/history")
+async def save_history(
+    payload: SaveHistoryRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    record = CVAnalysisRecord(
+        user_id=current_user.id,
+        source_name=payload.source_name,
+        overall_score=payload.overall_score,
+        result=payload.result,
+        candidate_info=payload.candidate_info,
+        jd_info=payload.jd_info,
+        created_at=datetime.utcnow(),
+    )
+    db.add(record)
+    await db.commit()
+    await db.refresh(record)
+    return _fmt_history(record)
+
+
+@router.get("/history")
+async def list_history(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    r = await db.execute(
+        select(CVAnalysisRecord)
+        .where(CVAnalysisRecord.user_id == current_user.id)
+        .order_by(CVAnalysisRecord.created_at.desc())
+        .limit(50)
+    )
+    return [_fmt_history(rec) for rec in r.scalars().all()]
+
+
+@router.delete("/history/{record_id}")
+async def delete_history_item(
+    record_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    r = await db.execute(
+        select(CVAnalysisRecord).where(
+            CVAnalysisRecord.id == record_id,
+            CVAnalysisRecord.user_id == current_user.id,
+        )
+    )
+    rec = r.scalar_one_or_none()
+    if not rec:
+        raise HTTPException(404, "History item not found")
+    await db.delete(rec)
+    await db.commit()
+    return {"message": "Deleted"}
+
+
+@router.delete("/history")
+async def delete_all_history(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from sqlalchemy import delete as sql_delete
+    await db.execute(sql_delete(CVAnalysisRecord).where(CVAnalysisRecord.user_id == current_user.id))
+    await db.commit()
+    return {"message": "Deleted"}
