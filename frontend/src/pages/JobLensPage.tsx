@@ -7,6 +7,7 @@ import {
   CheckCircle, Clock, XCircle, Star, Video, RefreshCw, Sparkles, BarChart2,
   Trash2, Mail } from "lucide-react";
 import { api } from "../lib/api";
+import HistoryDropdown from "../components/HistoryDropdown";
 
 // ─── API ───────────────────────────────────────────────────────────────────
 const jobLensApi = {
@@ -872,23 +873,18 @@ export default function JobLensPage() {
         </div>
 
         {tab === "history" && sessions.length > 0 && (
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <select className="tiq-input" style={{ maxWidth: 320 }}
-              value={activeSessionId ?? ""}
-              onChange={e => setActiveSessionId(e.target.value ? Number(e.target.value) : null)}>
-              <option value="">Select a session…</option>
-              {sessions.map((s: any) => (
-                <option key={s.id} value={s.id}>
-                  Session #{s.id} · {s.cv_count} CVs · {new Date(s.created_at).toLocaleDateString()}
-                </option>
-              ))}
-            </select>
-            {activeSessionId && (
-              <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ color: "var(--rose-500)" }}
-                onClick={() => { if (confirm("Delete this session?")) deleteMutation.mutate(activeSessionId); }}>
-                <Trash2 size={12} />
-              </button>
-            )}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, maxWidth: 380, width: "100%" }}>
+            <HistoryDropdown
+              value={activeSessionId}
+              onChange={id => setActiveSessionId(id as number | null)}
+              options={sessions.map((s: any) => ({
+                id: s.id,
+                label: `Session #${s.id} · ${s.cv_count} CVs · ${new Date(s.created_at).toLocaleDateString()}`,
+              }))}
+              onDelete={id => deleteMutation.mutate(id as number)}
+              placeholder="Select a session…"
+              confirmDeleteMessage="Delete this session?"
+            />
           </div>
         )}
       </div>

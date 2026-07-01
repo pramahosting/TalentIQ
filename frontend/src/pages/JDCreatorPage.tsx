@@ -6,6 +6,7 @@ import {
 import { jdcreatorApi, downloadBlob } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
 import { useLatestMutation } from "../hooks/useLatestMutation";
+import HistoryDropdown from "../components/HistoryDropdown";
 
 function todayStr() {
   const d = new Date();
@@ -192,27 +193,22 @@ export default function JDCreatorPage() {
         </div>
 
         {tab === "history" && documents.length > 0 && (
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <select className="tiq-input" style={{ maxWidth: 340 }}
-              value={selectedId ?? ""}
-              onChange={e => setSelectedId(e.target.value ? Number(e.target.value) : null)}>
-              <option value="">Select a JD…</option>
-              {documents.map((d: any) => (
-                <option key={d.id} value={d.id}>
-                  {d.role_title} · {d.company_name || "—"} · {new Date(d.created_at).toLocaleDateString()}
-                </option>
-              ))}
-            </select>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, maxWidth: 420, width: "100%" }}>
+            <HistoryDropdown
+              value={selectedId}
+              onChange={id => setSelectedId(id as number | null)}
+              options={documents.map((d: any) => ({
+                id: d.id,
+                label: `${d.role_title} · ${d.company_name || "—"} · ${new Date(d.created_at).toLocaleDateString()}`,
+              }))}
+              onDelete={id => deleteMut.mutate(id as number)}
+              placeholder="Select a JD…"
+              confirmDeleteMessage="Delete this JD?"
+            />
             {selectedId && (
-              <>
-                <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => downloadMut.mutate(selectedId)} disabled={downloadMut.isPending}>
-                  <Download size={12} /> {downloadMut.isPending ? "Preparing…" : "Word"}
-                </button>
-                <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ color: "var(--rose-500)" }}
-                  onClick={() => { if (confirm("Delete this JD?")) deleteMut.mutate(selectedId); }}>
-                  <Trash2 size={12} />
-                </button>
-              </>
+              <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => downloadMut.mutate(selectedId)} disabled={downloadMut.isPending}>
+                <Download size={12} /> {downloadMut.isPending ? "Preparing…" : "Word"}
+              </button>
             )}
           </div>
         )}

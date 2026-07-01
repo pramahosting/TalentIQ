@@ -8,6 +8,7 @@ import {
 } from "recharts";
 import { jobintelApi } from "../lib/api";
 import { useLatestMutation } from "../hooks/useLatestMutation";
+import HistoryDropdown from "../components/HistoryDropdown";
 
 const PIE_COLORS = ["#00c7b7","#8b5cf6","#f59e0b","#f43f5e","#3b82f6","#10b981","#ec4899","#06b6d4","#84cc16","#f97316"];
 
@@ -125,7 +126,7 @@ export default function MarketIntelPage() {
         </div>
       </div>
 
-      {/* Run form + compact history side by side */}
+      {/* Run form + history box side by side (history now a dropdown, same spot as before) */}
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 16, marginBottom: 24, alignItems: "start" }}>
         <div className="tiq-card" style={{ margin: 0 }}>
           <div className="tiq-card-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -159,48 +160,30 @@ export default function MarketIntelPage() {
           </div>
         </div>
 
-        {/* Compact run history */}
-        <div className="tiq-card" style={{ margin: 0, maxHeight: 180, overflow: "hidden", display: "flex", flexDirection: "column", padding: 12 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-            <span style={{ fontSize: 12, fontWeight: 700 }}>Analysis history ({runs.length})</span>
+        {/* Analysis history — same spot as before, now a dropdown */}
+        <div className="tiq-card" style={{ margin: 0 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <span style={{ fontSize: 12, fontWeight: 700 }}>Analysis History ({runs.length})</span>
             {runs.length > 0 && (
-              <button className="tiq-btn tiq-btn-ghost tiq-btn-sm"
-                style={{ fontSize: 10, color: "var(--rose-500)", display: "flex", alignItems: "center", gap: 3, padding: "2px 6px" }}
+              <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ fontSize: 10, color: "var(--rose-500)", padding: "2px 6px" }}
                 onClick={() => { if (confirm("Delete all runs?")) deleteAllMutation.mutate(); }}>
-                <Trash2 size={10} /> Clear all
+                Clear all
               </button>
             )}
           </div>
-          {runsLoading ? (
-            <div className="tiq-spinner-wrap" style={{ padding: 8 }}><div className="tiq-spinner" style={{ width: 18, height: 18 }} /></div>
-          ) : runs.length === 0 ? (
-            <div style={{ fontSize: 11, color: "var(--text-muted)", padding: "8px 2px" }}>No runs yet</div>
-          ) : (
-            <div style={{ overflowY: "auto", flex: 1 }}>
-              {runs.map((run: any) => (
-                <div key={run.id} onClick={() => setSelectedRunId(run.id)} style={{
-                  padding: "6px 8px", borderRadius: 6, cursor: "pointer",
-                  background: selectedRunId === run.id ? "rgba(0,199,183,.06)" : "transparent",
-                  border: selectedRunId === run.id ? "1px solid rgba(0,199,183,.2)" : "1px solid transparent",
-                  marginBottom: 4,
-                }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div style={{ fontSize: 11, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{run.industry || run.role}</div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
-                      <StatusBadge status={run.status} />
-                      <button onClick={e => { e.stopPropagation(); if (confirm("Delete this run?")) deleteMutation.mutate(run.id); }}
-                        style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", display: "flex", padding: 1 }}>
-                        <Trash2 size={10} />
-                      </button>
-                    </div>
-                  </div>
-                  <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>
-                    {run.location} · {run.total_jobs_scraped} jobs · {new Date(run.created_at).toLocaleDateString()}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+          <div style={{ maxWidth: 420, width: "100%" }}>
+            <HistoryDropdown
+              value={selectedRunId}
+              onChange={id => setSelectedRunId(id as number | null)}
+              options={runs.map((run: any) => ({
+                id: run.id,
+                label: `${run.industry || run.role} · ${run.location} · ${run.total_jobs_scraped} jobs · ${run.status} · ${new Date(run.created_at).toLocaleDateString()}`,
+              }))}
+              onDelete={id => deleteMutation.mutate(id as number)}
+              placeholder="Select a past run…"
+              confirmDeleteMessage="Delete this run?"
+            />
+          </div>
         </div>
       </div>
 

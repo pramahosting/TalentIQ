@@ -6,6 +6,7 @@ import { linklensApi, downloadBlob } from "../lib/api";
 import { api } from "../lib/api";
 import { useSearchHistory } from "../hooks/useSearchHistory";
 import { useLatestMutation } from "../hooks/useLatestMutation";
+import HistoryDropdown from "../components/HistoryDropdown";
 
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, { cls: string; icon: any }> = {
@@ -216,38 +217,30 @@ export default function LinkLensPage() {
             </button>
           </div>
 
-          {/* PAST SEARCHES */}
-          <div className="tiq-card" style={{ padding: 0 }}>
-            <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border)", fontSize: 12, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase" }}>
-              Past Searches
-            </div>
-            {searches.length === 0 ? (
-              <div style={{ padding: 16, fontSize: 13, color: "var(--text-muted)" }}>No searches yet.</div>
-            ) : searches.map((s: any) => (
-              <div key={s.id}
-                onClick={() => { setActiveSearchId(s.id); setStatusLog([]); }}
-                style={{
-                  padding: "10px 16px", cursor: "pointer", fontSize: 13,
-                  background: activeSearchId === s.id ? "rgba(0,199,183,.06)" : undefined,
-                  borderLeft: activeSearchId === s.id ? "3px solid var(--teal-500)" : "3px solid transparent",
-                }}>
-                <div style={{ fontWeight: 600 }}>{s.job_title}</div>
-                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2, display: "flex", gap: 8, alignItems: "center" }}>
-                  <StatusBadge status={s.status} />
-                  <span>{s.profiles_found} profiles</span>
-                  <span>{s.city}, {s.country}</span>
-                  <button
-                    onClick={e => { e.stopPropagation(); if(confirm("Delete this search?")) deleteMut.mutate(s.id); }}
-                    style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", display: "flex", padding: 2 }}
-                  ><Trash2 size={11} /></button>
-                </div>
-              </div>
-            ))}
-          </div>
         </div>
 
         {/* ── MAIN PANEL ── */}
         <div>
+          {/* PAST SEARCHES — top-right, above the results */}
+          {searches.length > 0 && (
+            <div className="tiq-card tiq-mb-4" style={{ display: "flex", justifyContent: "flex-end" }}>
+              <div style={{ maxWidth: 420, width: "100%" }}>
+                <label className="tiq-label" style={{ display: "block", textAlign: "right" }}>Past Searches ({searches.length})</label>
+                <HistoryDropdown
+                  value={activeSearchId}
+                  onChange={id => { setActiveSearchId(id as number | null); setStatusLog([]); }}
+                  options={searches.map((s: any) => ({
+                    id: s.id,
+                    label: `${s.job_title} · ${s.city}, ${s.country} · ${s.profiles_found} profiles · ${s.status}`,
+                  }))}
+                  onDelete={id => deleteMut.mutate(id as number)}
+                  placeholder="Select a past search…"
+                  confirmDeleteMessage="Delete this search?"
+                />
+              </div>
+            </div>
+          )}
+
           {/* LIVE STATUS LOG */}
           {(statusLog.length > 0 || streaming) && (
             <div className="tiq-card tiq-mb-4" style={{ background: "#0d1117", border: "1px solid #30363d" }}>
