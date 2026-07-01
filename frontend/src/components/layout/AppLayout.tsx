@@ -1,7 +1,7 @@
 import { Outlet, NavLink, Link } from "react-router-dom";
 import {
   LayoutDashboard, Search, BarChart2, Users,
-  Settings, LogOut, Shield, Database, BrainCircuit, Briefcase, Home
+  Settings, LogOut, Shield, Database, BrainCircuit, Briefcase, Home, FileEdit
 } from "lucide-react";
 import { useAuth } from "../../hooks/useAuth";
 
@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { to: "/app/jobintel", label: "MarketIntel",  icon: BarChart2        },
   { to: "/app/linklens", label: "LinkExplore",  icon: Users            },
   { to: "/app/cvintel",  label: "CVAnalysis",   icon: BrainCircuit     },
+  { to: "/app/jdcreator",label: "JD Creator",   icon: FileEdit         },
   { to: "/app/joblens",  label: "CandidateLens",icon: Briefcase        },
 ];
 

@@ -10,6 +10,7 @@ import JobIntelPage   from "./pages/JobIntelPage";
 import LinkLensPage   from "./pages/LinkLensPage";
 import CVIntelPage    from "./pages/CVIntelPage";
 import JobLensPage    from "./pages/JobLensPage";
+import JDCreatorPage  from "./pages/JDCreatorPage";
 import PublicInterviewPage from "./pages/PublicInterviewPage";
 import SettingsPage   from "./pages/SettingsPage";
 import AdminSetupPage from "./pages/AdminSetupPage";
@@ -50,6 +51,7 @@ export default function App() {
               <Route path="jobintel"   element={<JobIntelPage />} />
               <Route path="linklens"   element={<LinkLensPage />} />
               <Route path="cvintel"    element={<CVIntelPage />} />
+              <Route path="jdcreator"  element={<JDCreatorPage />} />
               <Route path="joblens"    element={<JobLensPage />} />
               <Route path="settings"   element={<SettingsPage />} />
               <Route path="admin-setup"  element={<AdminRoute><AdminSetupPage /></AdminRoute>} />

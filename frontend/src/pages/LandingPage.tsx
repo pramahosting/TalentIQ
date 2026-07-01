@@ -3,7 +3,7 @@ import { useAuth } from "../hooks/useAuth";
 import {
   Search, BarChart2, Users, Zap, Shield, Download,
   BrainCircuit, Briefcase, ArrowRight, CheckCircle,
-  Globe, Database, Star, TrendingUp, Mail, Twitter, Linkedin,
+  Globe, Database, Star, TrendingUp, Mail, Twitter, Linkedin, FileEdit,
 } from "lucide-react";
 
 const MODULES = [
@@ -36,6 +36,13 @@ const MODULES = [
     features: ["Instant ATS keyword scoring", "Matched vs missing skills", "AI improvement suggestions", "ATS formatting checker"],
   },
   {
+    icon: FileEdit, color: "#0d9488", bg: "rgba(13,148,136,.10)",
+    name: "JD Creator", route: "/app/jdcreator",
+    tagline: "AI-generated job descriptions in seconds",
+    desc: "Enter a role title, required skills, experience, and education — get a formal, professionally-written Position Description, ready to download as Word.",
+    features: ["AI-written purpose & responsibilities", "Company branding from your profile", "One-click Word (.docx) download", "Saved JD history"],
+  },
+  {
     icon: Briefcase, color: "#fb923c", bg: "rgba(251,146,60,.10)",
     name: "CandidateLens", route: "/app/joblens",
     tagline: "AI recruitment engine & video interviews",
@@ -45,7 +52,7 @@ const MODULES = [
 ];
 
 const STATS = [
-  { value: "5", label: "AI Modules" },
+  { value: "6", label: "AI Modules" },
   { value: "100%", label: "Data Ownership" },
   { value: "∞", label: "Searches Saved" },
   { value: "AI", label: "LLM Powered" },
@@ -126,7 +133,7 @@ export default function LandingPage() {
         <h1 style={{ fontSize: "clamp(36px,6vw,68px)", fontWeight: 900, lineHeight: 1.06, letterSpacing: "-2px", marginBottom: 24, color: "#0f172a" }}>
           Hire smarter with<br />
           <span style={{ background: "linear-gradient(135deg,#0ea5e9,#6366f1,#a855f7)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
-            five AI agents
+            six AI agents
           </span>
         </h1>
 
@@ -183,13 +190,13 @@ export default function LandingPage() {
       <section style={{ padding: "96px 5%", maxWidth: 1200, margin: "0 auto" }}>
         <div style={{ textAlign: "center", marginBottom: 64 }}>
           <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: "2px", textTransform: "uppercase", color: "#94a3b8", marginBottom: 12 }}>
-            FIVE SPECIALISED MODULES
+            SIX SPECIALISED MODULES
           </div>
           <h2 style={{ fontSize: "clamp(28px,4vw,44px)", fontWeight: 800, letterSpacing: "-1px", color: "#0f172a", marginBottom: 16 }}>
             Every tool you need to hire smarter
           </h2>
           <p style={{ fontSize: 17, color: "#64748b", maxWidth: 520, margin: "0 auto" }}>
-            Each module is an independent AI agent. Use one or all five — they share the same database so your data compounds.
+            Each module is an independent AI agent. Use one or all six — they share the same database so your data compounds.
           </p>
         </div>
 
@@ -274,7 +281,7 @@ export default function LandingPage() {
               { icon: TrendingUp, color: "#f59e0b", title: "Grows with you", body: "Start with job hunting. Add market intelligence. Build a recruiting pipeline. Each module is composable." },
               { icon: Zap, color: "#34d399", title: "LangChain + Groq", body: "Each module is a composable LangChain agent — easy to extend, chain, and deploy for your workflow." },
               { icon: Globe, color: "#f472b6", title: "No vendor lock-in", body: "Self-hosted, open architecture. Swap any LLM, API, or database. Your keys, your data." },
-              { icon: Database, color: "#fb923c", title: "One platform, five tools", body: "Stop juggling five SaaS products. TalentIQ unifies job search, market research, and recruiting." },
+              { icon: Database, color: "#fb923c", title: "One platform, six tools", body: "Stop juggling six SaaS products. TalentIQ unifies job search, market research, and recruiting." },
             ].map(({ icon: Icon, color, title, body }) => (
               <div key={title} style={{
                 padding: 28, background: "white", borderRadius: 16,
@@ -301,7 +308,7 @@ export default function LandingPage() {
           Ready to hire smarter?
         </h2>
         <p style={{ fontSize: 18, color: "rgba(255,255,255,.8)", marginBottom: 40 }}>
-          Free to start. All five modules included. Your data stays yours.
+          Free to start. All six modules included. Your data stays yours.
         </p>
         {isLoggedIn ? (
           <Link to="/app" style={{

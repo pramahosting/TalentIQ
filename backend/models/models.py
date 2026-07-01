@@ -44,6 +44,7 @@ class User(Base):
     linklens_searches = relationship("LinkLensSearch",  back_populates="user", cascade="all, delete-orphan")
     audit_logs        = relationship("AuditLog",        back_populates="user", cascade="all, delete-orphan")
     joblens_sessions  = relationship("JobLensSession",  back_populates="user", cascade="all, delete-orphan")
+    jd_documents      = relationship("JDDocument",      back_populates="user", cascade="all, delete-orphan")
 
 
 class UserAPIKey(Base):
@@ -320,3 +321,32 @@ class JobLensCandidate(Base):
     shortlisted         = Column(Boolean, default=False)
 
     session = relationship("JobLensSession", back_populates="candidates")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# JD CREATOR
+# ══════════════════════════════════════════════════════════════════════════════
+
+class JDDocument(Base):
+    __tablename__ = "tiq_jd_documents"
+
+    id                  = Column(Integer, primary_key=True, index=True)
+    user_id             = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
+    role_title          = Column(String(300), nullable=False)
+    company_name        = Column(String(300))
+    job_type            = Column(String(50))    # Full time / Fix term / Contract
+    contract_duration   = Column(String(50))    # e.g. "6 Months", "12 Months", or a specific end date
+    issue_date          = Column(String(20))
+    expiry_date         = Column(String(20))
+    skills_required     = Column(JSON, default=list)
+    experience_required = Column(Text)
+    education_required  = Column(Text)
+    position_purpose    = Column(Text)     # AI-generated summary paragraph
+    organisational_context = Column(Text)  # AI-generated context paragraph
+    responsibilities    = Column(JSON, default=list)  # AI-generated bullet list (12-15 items)
+    required_qualifications = Column(JSON, default=list)   # AI-generated rich bullet list
+    preferred_qualifications = Column(JSON, default=list)  # AI-generated nice-to-have bullet list
+    ai_powered          = Column(Boolean, default=False)
+    created_at          = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="jd_documents")

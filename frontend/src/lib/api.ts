@@ -90,3 +90,12 @@ export const joblensApi = {
   deleteSession: (id: number) => api.delete(`/api/joblens/sessions/${id}`).then(r => r.data),
   deleteAllSessions: () => api.delete("/api/joblens/sessions").then(r => r.data),
 };
+
+export const jdcreatorApi = {
+  generate: (data: any) => api.post("/api/jdcreator/generate", data).then(r => r.data),
+  listDocuments: () => api.get("/api/jdcreator/documents").then(r => r.data),
+  getDocument: (id: number) => api.get(`/api/jdcreator/documents/${id}`).then(r => r.data),
+  deleteDocument: (id: number) => api.delete(`/api/jdcreator/documents/${id}`).then(r => r.data),
+  download: (id: number) =>
+    api.get(`/api/jdcreator/documents/${id}/download`, { responseType: "blob" }).then(r => r.data),
+};
