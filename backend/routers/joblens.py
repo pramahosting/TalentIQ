@@ -5,12 +5,18 @@ Mirrors the original JobLens scoring logic:
   2. Keyword match CV text against extracted skills
   3. Bonus for degree/experience mentions
   4. Generate interview questions via LLM
+  5. Generate a 10-statement resume summary via LLM
+  6. Send video-interview invite emails with a candidate-facing link
 All persisted to PostgreSQL (tiq_joblens_* tables).
 """
 import io
 import re
 import os
 import json
+import secrets
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
@@ -339,7 +345,165 @@ def _default_questions(name: str, skills: list) -> list:
     return qs[:5]
 
 
-# ── FORMAT _FORMAT_CANDIDATE ─────────────────────────────────────────────────
+# ── RESUME SUMMARY (10 statements) ──────────────────────────────────────────
+
+async def generate_resume_summary(cv_text: str, groq_key: Optional[str]) -> list:
+    """Produce exactly 10 concise, factual statements summarising the resume,
+    covering Education, Skills, Experience, Availability, and Citizenship/Work
+    Rights status. Uses Groq LLM when a key is available, otherwise falls
+    back to heuristic keyword extraction."""
+    if groq_key:
+        try:
+            from langchain_groq import ChatGroq
+            from langchain.schema import HumanMessage
+
+            llm = ChatGroq(api_key=groq_key, model="llama3-70b-8192", temperature=0.2)
+            prompt = f"""You are a recruitment analyst. Read the resume below and produce
+EXACTLY 10 concise, factual, one-sentence statements summarising the candidate.
+Cover these areas across the 10 statements: Education, Skills, Experience,
+Availability, and Citizenship/Work Rights status. If a topic is not mentioned
+in the resume, write a statement saying it was "Not specified in resume."
+Do not invent facts that aren't supported by the resume text.
+
+Resume:
+\"\"\"{cv_text[:4000]}\"\"\"
+
+Return ONLY valid JSON in this exact format:
+{{"statements": ["...", "...", "...", "...", "...", "...", "...", "...", "...", "..."]}}"""
+
+            resp = llm.invoke([HumanMessage(content=prompt)])
+            raw = resp.content.strip().replace("```json", "").replace("```", "").strip()
+            data = json.loads(raw)
+            statements = [s for s in data.get("statements", []) if s]
+            if statements:
+                return statements[:10]
+        except Exception:
+            pass
+    return _fallback_resume_summary(cv_text)
+
+
+def _fallback_resume_summary(cv_text: str) -> list:
+    """Heuristic 10-statement resume summary used when no Groq key is configured."""
+    low = cv_text.lower()
+    statements = []
+
+    edu_m = re.search(r"(bachelor|master|phd|doctorate|diploma|degree)[^\n.]{0,90}", low)
+    statements.append(
+        f"Education: {edu_m.group().strip().capitalize()}." if edu_m
+        else "Education: Not specified in resume."
+    )
+
+    keyword_bank = [
+        "python", "java", "javascript", "sql", "excel", "power bi", "tableau",
+        "aws", "azure", "gcp", "docker", "kubernetes", "project management",
+        "accounting", "communication", "leadership", "react", "node",
+        "salesforce", "sap", "financial reporting", "data analysis",
+    ]
+    found_skills = [s for s in keyword_bank if s in low]
+    statements.append(
+        f"Skills: Resume indicates experience with {', '.join(found_skills[:6])}." if found_skills
+        else "Skills: No specific technical skills clearly listed."
+    )
+
+    exp_m = re.search(r"(\d{1,2})\+?\s*(?:years?|yrs?)\s*(?:of\s+)?experience", low)
+    statements.append(
+        f"Experience: Approximately {exp_m.group(1)}+ years of relevant experience." if exp_m
+        else "Experience: Years of experience not explicitly stated in resume."
+    )
+
+    statements.append(
+        "Experience: Resume references current or recent professional roles." if re.search(r"present|current(ly)?\s+work", low)
+        else "Experience: Most recent role not clearly identifiable from resume."
+    )
+
+    if re.search(r"immediate(ly)?\s+available|available\s+immediately|notice\s+period", low):
+        avail_m = re.search(r"([a-z0-9 ]{0,10}notice\s+period[a-z0-9 ]{0,15}|immediate(ly)?\s+available)", low)
+        statements.append(
+            f"Availability: {avail_m.group().strip().capitalize()}." if avail_m
+            else "Availability: Mentioned in resume."
+        )
+    else:
+        statements.append("Availability: Not specified in resume.")
+
+    if re.search(r"citizen|permanent resident|\bpr\b|work visa|work rights|unrestricted work rights|485 visa|482 visa|sponsorship", low):
+        cit_m = re.search(r"([a-z0-9 ]{0,20}(citizen|permanent resident|work visa|work rights|sponsorship)[a-z0-9 ]{0,20})", low)
+        statements.append(
+            f"Citizenship/Work Rights: {cit_m.group().strip().capitalize()}." if cit_m
+            else "Citizenship/Work Rights: Mentioned in resume."
+        )
+    else:
+        statements.append("Citizenship/Work Rights: Not specified in resume.")
+
+    if "@" in cv_text:
+        statements.append("Contact: Valid contact email address is present in the resume.")
+    else:
+        statements.append("Contact: No email address detected in the resume.")
+
+    statements.append(
+        "Certifications: Resume mentions professional certification(s)." if re.search(r"certificat", low)
+        else "Certifications: No certifications explicitly mentioned."
+    )
+
+    statements.append(
+        "Project Experience: Resume highlights project-based work experience." if re.search(r"project", low)
+        else "Project Experience: No specific projects called out in resume."
+    )
+
+    while len(statements) < 10:
+        statements.append("No further notable details extracted from resume.")
+    return statements[:10]
+
+
+# ── SMTP EMAIL SENDING ────────────────────────────────────────────────────────
+
+async def _get_smtp_config(user_id: int, db: AsyncSession) -> dict:
+    kr = await db.execute(
+        select(UserAPIKey).where(
+            UserAPIKey.user_id == user_id,
+            UserAPIKey.service == "smtp",
+        )
+    )
+    return {k.key_name: k.key_value for k in kr.scalars().all()}
+
+
+def _send_email(smtp_cfg: dict, to_email: str, subject: str, html_body: str):
+    host = smtp_cfg.get("host")
+    port = int(smtp_cfg.get("port") or 587)
+    username = smtp_cfg.get("username")
+    password = smtp_cfg.get("password")
+    from_email = smtp_cfg.get("from_email") or username
+
+    if not (host and username and password and from_email):
+        raise HTTPException(
+            400,
+            "SMTP is not configured. Add credentials in Settings > API Keys "
+            "(service: smtp; key names: host, port, username, password, from_email)."
+        )
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = from_email
+    msg["To"] = to_email
+    msg.attach(MIMEText(html_body, "html"))
+
+    try:
+        with smtplib.SMTP(host, port, timeout=15) as server:
+            server.starttls()
+            server.login(username, password)
+            server.sendmail(from_email, [to_email], msg.as_string())
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Failed to send email: {str(e)[:200]}")
+
+
+class SendInviteRequest(BaseModel):
+    to_email: str
+    subject: str
+    body_html: str
+
+
+# ── FORMAT CANDIDATE ─────────────────────────────────────────────────────────
 
 def _fmt(c: JobLensCandidate) -> dict:
     return {
@@ -356,6 +520,9 @@ def _fmt(c: JobLensCandidate) -> dict:
         "bonus_reasons": c.bonus_reasons,
         "experience_years": c.experience_years or "",
         "summary": c.summary or "",
+        "resume_summary": c.resume_summary or [],
+        "interview_token": c.interview_token,
+        "contacted": bool(c.contacted),
         "video_status": c.video_status,
         "shortlisted": c.shortlisted,
         "interview_questions": c.interview_questions or [],
@@ -448,14 +615,15 @@ async def run_joblens(
             elif score >= low_threshold:
                 status = "Review"
 
-            # Generate questions immediately if Groq available
-            questions = []
+            # Generate questions and resume summary immediately if Groq available
             if groq_key:
                 questions = await generate_questions(
                     final_jd, info["name"], result["matched"], groq_key
                 )
             else:
                 questions = _default_questions(info["name"], result["matched"])
+
+            resume_summary = await generate_resume_summary(cv_text, groq_key)
 
             candidate = JobLensCandidate(
                 session_id=session.id,
@@ -471,6 +639,7 @@ async def run_joblens(
                 bonus_reasons=result["reasons"],
                 experience_years=info.get("experience_years", ""),
                 summary=info.get("summary", ""),
+                resume_summary=resume_summary,
                 interview_questions=questions,
                 video_status="Pending",
                 shortlisted=False,
@@ -621,6 +790,74 @@ async def toggle_shortlist(
     return {"shortlisted": c.shortlisted}
 
 
+# ── CANDIDATE CONTACT / VIDEO INTERVIEW INVITE ───────────────────────────────
+
+@router.post("/candidates/{candidate_id}/prepare-invite")
+async def prepare_invite(
+    candidate_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ensures the candidate has a unique interview token and returns it so
+    the frontend can build a shareable, no-login video-interview link."""
+    cr = await db.execute(
+        select(JobLensCandidate).where(JobLensCandidate.id == candidate_id)
+    )
+    c = cr.scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "Candidate not found")
+
+    if not c.interview_token:
+        c.interview_token = secrets.token_urlsafe(24)
+        await db.commit()
+        await db.refresh(c)
+
+    return {
+        "token": c.interview_token,
+        "candidate_name": c.name,
+        "candidate_email": c.email,
+    }
+
+
+@router.post("/candidates/{candidate_id}/send-invite")
+async def send_invite(
+    candidate_id: int,
+    payload: SendInviteRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    cr = await db.execute(
+        select(JobLensCandidate).where(JobLensCandidate.id == candidate_id)
+    )
+    c = cr.scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "Candidate not found")
+
+    smtp_cfg = await _get_smtp_config(current_user.id, db)
+    _send_email(smtp_cfg, payload.to_email, payload.subject, payload.body_html)
+
+    return {"sent": True}
+
+
+@router.post("/candidates/{candidate_id}/mark-contacted")
+async def mark_contacted(
+    candidate_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Flips the 'contacted' flag once the recruiter sends the interview
+    invite letter (via mailto handoff to their own mail client)."""
+    cr = await db.execute(
+        select(JobLensCandidate).where(JobLensCandidate.id == candidate_id)
+    )
+    c = cr.scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "Candidate not found")
+    c.contacted = True
+    await db.commit()
+    return {"contacted": True}
+
+
 class InterviewResult(BaseModel):
     happy: int = 0
     neutral: int = 0
@@ -645,6 +882,51 @@ async def save_interview_result(
     c = cr.scalar_one_or_none()
     if not c:
         raise HTTPException(404, "Candidate not found")
+    c.emotion_happy    = result.happy
+    c.emotion_neutral  = result.neutral
+    c.emotion_sad      = result.sad
+    c.emotion_angry    = result.angry
+    c.emotion_fear     = result.fear
+    c.emotion_disgust  = result.disgust
+    c.emotion_surprise = result.surprise
+    c.dominant_emotion = result.dominant
+    c.video_status     = "Completed"
+    await db.commit()
+    return {"status": "saved"}
+
+
+# ── PUBLIC (candidate-facing, NO auth required) ──────────────────────────────
+# These power the emailed video-interview link so a candidate can complete
+# the interview without a TalentIQ login. Access is gated by the unguessable
+# token, not a session/auth check.
+
+@router.get("/public/interview/{token}")
+async def public_get_interview(token: str, db: AsyncSession = Depends(get_db)):
+    cr = await db.execute(
+        select(JobLensCandidate).where(JobLensCandidate.interview_token == token)
+    )
+    c = cr.scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "This interview link is invalid or has expired.")
+    return {
+        "candidate_name": c.name,
+        "questions": c.interview_questions or [],
+        "video_status": c.video_status,
+    }
+
+
+@router.post("/public/interview/{token}/result")
+async def public_save_interview_result(
+    token: str,
+    result: InterviewResult,
+    db: AsyncSession = Depends(get_db),
+):
+    cr = await db.execute(
+        select(JobLensCandidate).where(JobLensCandidate.interview_token == token)
+    )
+    c = cr.scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "This interview link is invalid or has expired.")
     c.emotion_happy    = result.happy
     c.emotion_neutral  = result.neutral
     c.emotion_sad      = result.sad
@@ -690,7 +972,7 @@ async def export_session(
             "Name":              c.name,
             "Email":             c.email,
             "Phone":             c.phone,
-            "Experience":        c.experience_years or "",
+            "Resume Summary":    " | ".join(c.resume_summary or []),
             "ATS Score":         f"{c.ats_score:.1f}%",
             "Key Strength":      ", ".join(c.matched_skills or []),
             "Considerations":    ", ".join(c.missing_skills or []),

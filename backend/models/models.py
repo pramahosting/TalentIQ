@@ -305,6 +305,9 @@ class JobLensCandidate(Base):
     experience_years    = Column(String(20))
     summary             = Column(Text)
     interview_questions = Column(JSON, default=list)
+    resume_summary      = Column(JSON, default=list)   # 10-statement AI resume summary
+    interview_token     = Column(String(64), unique=True, index=True, nullable=True)
+    contacted           = Column(Boolean, default=False)  # invite email sent
     video_status        = Column(String(50), default="Pending")
     emotion_happy       = Column(Integer, default=0)
     emotion_neutral     = Column(Integer, default=0)

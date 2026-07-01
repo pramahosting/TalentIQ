@@ -14,6 +14,10 @@ from sqlalchemy import text
 MIGRATIONS = [
     "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS experience_years VARCHAR(20)",
     "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS summary TEXT",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS resume_summary JSON DEFAULT '[]'",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS interview_token VARCHAR(64)",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS contacted BOOLEAN DEFAULT FALSE",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_tiq_joblens_candidates_interview_token ON tiq_joblens_candidates (interview_token)",
     "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS emotion_disgust INTEGER DEFAULT 0",
     "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS emotion_surprise INTEGER DEFAULT 0",
     "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS dominant_emotion VARCHAR(20) DEFAULT 'Neutral'",
