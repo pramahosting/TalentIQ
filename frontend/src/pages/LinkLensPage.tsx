@@ -5,6 +5,7 @@ import { Users, Search, Download, RefreshCw, Linkedin, MapPin, Briefcase, CheckC
 import { linklensApi, downloadBlob } from "../lib/api";
 import { api } from "../lib/api";
 import { useSearchHistory } from "../hooks/useSearchHistory";
+import { useLatestMutation } from "../hooks/useLatestMutation";
 
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, { cls: string; icon: any }> = {
@@ -71,6 +72,7 @@ export default function LinkLensPage() {
   }, [statusLog]);
 
   const startMut = useMutation({
+    mutationKey: ["linklens-start"],
     mutationFn: () => api.post("/api/linklens/search", {
       ...form,
       max_results: parseInt(form.max_results),
@@ -89,6 +91,23 @@ export default function LinkLensPage() {
       setStatusLog(l => [...l, `❌ Error: ${e.response?.data?.detail || e.message}`]);
     },
   });
+
+  // Shared-cache view of the same mutation — lets a started search survive
+  // the user switching to another agent page. The actual scrape runs as a
+  // backend job regardless (tracked by activeSearch's own polling below),
+  // so nothing is lost; this just re-selects it here on return. Note: the
+  // live SSE status log is inherently a live-tailing feature and doesn't
+  // replay past messages — the search's persisted status/progress is what
+  // matters and that's always safe.
+  const startState = useLatestMutation<any>(["linklens-start"]);
+  const lastSeenStartId = useRef<number | null>(null);
+  useEffect(() => {
+    if (startState.status === "success" && startState.data?.id && startState.data.id !== lastSeenStartId.current) {
+      lastSeenStartId.current = startState.data.id;
+      qc.invalidateQueries({ queryKey: ["ll-searches"] });
+      setActiveSearchId(prev => prev ?? startState.data.id);
+    }
+  }, [startState.status, startState.data?.id, qc]);
 
   const startStatusStream = (searchId: number) => {
     setStreaming(true);
@@ -191,9 +210,9 @@ export default function LinkLensPage() {
             <button className="tiq-btn tiq-btn-primary"
               style={{ width: "100%", justifyContent: "center" }}
               onClick={() => startMut.mutate()}
-              disabled={!form.job_title || startMut.isPending || streaming}>
+              disabled={!form.job_title || startState.status === "pending" || streaming}>
               <Search size={14} />
-              {streaming ? "Running…" : startMut.isPending ? "Starting…" : "Start Search"}
+              {streaming ? "Running…" : startState.status === "pending" ? "Starting…" : "Start Search"}
             </button>
           </div>
 

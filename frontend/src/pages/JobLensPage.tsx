@@ -1,6 +1,7 @@
 import { } from "react-router-dom";
 import { useState, useRef, useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useLatestMutation } from "../hooks/useLatestMutation";
 import {
   Users, Upload, FileText, Play, Download, ChevronDown, ChevronUp,
   CheckCircle, Clock, XCircle, Star, Video, RefreshCw, Sparkles, BarChart2,
@@ -766,6 +767,7 @@ export default function JobLensPage() {
   });
 
   const runMut = useMutation({
+    mutationKey: ["joblens-run"],
     mutationFn: () => {
       const form = new FormData();
       form.append("jd_text", jdText);
@@ -782,6 +784,24 @@ export default function JobLensPage() {
       qc.invalidateQueries({ queryKey: ["joblens-session", data.session_id] });
     },
   });
+
+  // Reads the same mutation from the shared, app-level mutation cache — this
+  // is what survives the user switching to another agent page while a batch
+  // of CVs is still being scored, and picks the result back up when they
+  // return, whether or not this specific page instance was the one that
+  // originally triggered it.
+  const runState = useLatestMutation<any>(["joblens-run"]);
+  const lastSeenRunSessionId = useRef<number | null>(null);
+  useEffect(() => {
+    if (runState.status === "success" && runState.data?.session_id
+        && runState.data.session_id !== lastSeenRunSessionId.current) {
+      lastSeenRunSessionId.current = runState.data.session_id;
+      qc.invalidateQueries({ queryKey: ["joblens-sessions"] });
+      qc.invalidateQueries({ queryKey: ["joblens-session", runState.data.session_id] });
+      setActiveSessionId(runState.data.session_id);
+      setTab("history");
+    }
+  }, [runState.status, runState.data?.session_id, qc]);
 
   const exportMut = useMutation({
     mutationFn: (id: number) => jobLensApi.export(id),
@@ -919,19 +939,19 @@ export default function JobLensPage() {
             <button className="tiq-btn tiq-btn-primary"
               style={{ padding: "12px 40px", fontSize: 15, justifyContent: "center" }}
               onClick={() => runMut.mutate()}
-              disabled={runMut.isPending || (!jdText.trim() && !jdFile) || !cvFiles?.length}>
-              {runMut.isPending
+              disabled={runState.status === "pending" || (!jdText.trim() && !jdFile) || !cvFiles?.length}>
+              {runState.status === "pending"
                 ? <><span className="tiq-spinner" style={{ width: 16, height: 16, borderWidth: 2 }} /> Analysing CVs…</>
                 : <><Sparkles size={16} /> Run JobLens Analysis</>}
             </button>
-            {runMut.isPending && (
+            {runState.status === "pending" && (
               <div style={{ marginTop: 12, fontSize: 13, color: "var(--text-muted)" }}>
-                Extracting text, scoring CVs… {cvFiles?.length} candidate{(cvFiles?.length || 0) > 1 ? "s" : ""}
+                Extracting text, scoring CVs… This keeps running even if you switch to another page.
               </div>
             )}
-            {runMut.isError && (
+            {runState.status === "error" && (
               <div className="tiq-alert tiq-alert-error" style={{ marginTop: 12, maxWidth: 500, margin: "12px auto 0" }}>
-                {(runMut.error as any)?.response?.data?.detail || "Analysis failed"}
+                {(runState.error as any)?.response?.data?.detail || "Analysis failed"}
               </div>
             )}
           </div>

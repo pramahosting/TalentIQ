@@ -1,11 +1,13 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { } from "react-router-dom";
+import { useMutation } from "@tanstack/react-query";
 import {
   BrainCircuit, FileText, Target, CheckCircle, AlertTriangle,
   TrendingUp, Upload, X, Sparkles, ChevronDown, ChevronUp,
   User, MapPin, Briefcase, List,
 } from "lucide-react";
 import { api } from "../lib/api";
+import { useLatestMutation } from "../hooks/useLatestMutation";
 
 interface AnalysisResult {
   overallScore: number;
@@ -20,6 +22,12 @@ interface AnalysisResult {
   aiPowered?: boolean;
   note?: string;
   aiError?: string;
+}
+
+interface AnalyseData extends AnalysisResult {
+  candidateInfo: any;
+  jdInfo: any;
+  sourceName: string;
 }
 
 // ── Collapsible text panel ───────────────────────────────────────────────────
@@ -174,24 +182,17 @@ export default function CVAnalysisPage() {
   const [jdText, setJdText] = useState("");
   const [jdFile, setJdFile] = useState<File | null>(null);
 
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<AnalysisResult | null>(null);
-  const [error, setError] = useState("");
-  const [history, setHistory] = useState<Array<{id: number; name: string; score: number; result: AnalysisResult; ts: string}>>(() => {
+  const [formError, setFormError] = useState("");
+  const [history, setHistory] = useState<Array<{id: number; name: string; score: number; result: AnalyseData; ts: string}>>(() => {
     try { return JSON.parse(localStorage.getItem("cvintel_history") || "[]"); } catch { return []; }
   });
-  const [selectedHistId, setSelectedHistId] = useState<number | null>(null);
+  // null = "show the live/latest analysis"; set when the user manually
+  // browses a past entry from the History strip below.
+  const [viewingHistId, setViewingHistId] = useState<number | null>(null);
 
-  // candidate + JD info extracted after analysis
-  const [candidateInfo, setCandidateInfo] = useState<any>(null);
-  const [jdInfo, setJdInfo] = useState<any>(null);
-
-  const analyse = async () => {
-    setError("");
-    if (!jdText.trim() && !jdFile) { setError("Please provide a job description."); return; }
-    if (!resumeText.trim() && !resumeFile) { setError("Please provide your resume."); return; }
-    setLoading(true);
-    try {
+  const analyseMut = useMutation({
+    mutationKey: ["cvintel-analyze"],
+    mutationFn: async (): Promise<AnalyseData> => {
       const form = new FormData();
       form.append("job_description", jdText);
       form.append("resume_text", resumeText);
@@ -200,13 +201,44 @@ export default function CVAnalysisPage() {
       const res = await api.post("/api/cvintel/analyze", form, {
         headers: { "Content-Type": "multipart/form-data" },
       });
-      setResult(res.data);
-      // Save to session history
+      // Bundle the derived candidate/JD summary info together with the API
+      // result so it's all captured atomically in the mutation cache — this
+      // is what lets it survive the user navigating to another agent page
+      // and back, since it no longer depends on local component state.
+      const rText = resumeText || extractedResumeText;
+      return {
+        ...res.data,
+        candidateInfo: parseCandidateInfo(rText, resumeFile?.name || "Resume"),
+        jdInfo: parseJDInfo(jdText, jdFile?.name || "Job Description"),
+        sourceName: resumeFile?.name || "Resume",
+      };
+    },
+  });
+
+  // Reads the same mutation from the shared, app-level mutation cache —
+  // this is what actually survives navigating to another agent page while
+  // analysis is still running (the request itself keeps going regardless;
+  // this just lets any mount of this page find the result again).
+  const genState = useLatestMutation<AnalyseData>(["cvintel-analyze"]);
+  const liveResult = genState.status === "success" ? genState.data ?? null : null;
+  const displayResult: AnalyseData | null = viewingHistId
+    ? history.find(h => h.id === viewingHistId)?.result ?? null
+    : liveResult;
+
+  // Save each newly-completed analysis into local history. Driven off the
+  // shared cache (not the mutation's own onSuccess) so it reliably fires
+  // even if this page was unmounted when the request actually finished.
+  const lastSavedSubmittedAt = useRef<number | null>(null);
+  useEffect(() => {
+    if (genState.status === "success" && genState.data && genState.submittedAt
+        && genState.submittedAt !== lastSavedSubmittedAt.current) {
+      lastSavedSubmittedAt.current = genState.submittedAt;
+      const data = genState.data;
       const entry = {
         id: Date.now(),
-        name: resumeFile?.name || "Resume",
-        score: res.data.overallScore,
-        result: res.data,
+        name: data.sourceName || "Resume",
+        score: data.overallScore,
+        result: data,
         ts: new Date().toLocaleString(),
       };
       setHistory(prev => {
@@ -214,27 +246,28 @@ export default function CVAnalysisPage() {
         localStorage.setItem("cvintel_history", JSON.stringify(updated));
         return updated;
       });
-      setSelectedHistId(entry.id);
-      // Parse info for summary cards
-      const rText = resumeText || extractedResumeText;
-      const jText = jdText;
-      setCandidateInfo(parseCandidateInfo(rText, resumeFile?.name || "Resume"));
-      setJdInfo(parseJDInfo(jText, jdFile?.name || "Job Description"));
-    } catch (e: any) {
-      setError(e.response?.data?.detail || e.message);
-    } finally {
-      setLoading(false);
+      setViewingHistId(null);
     }
-  };
+  }, [genState.status, genState.submittedAt, genState.data]);
 
-  const reset = () => {
-    setResult(null); setError("");
-    // NOTE: do NOT clear files/text — keep them visible
-    setCandidateInfo(null); setJdInfo(null);
+  const runAnalyse = () => {
+    setFormError("");
+    if (!jdText.trim() && !jdFile) { setFormError("Please provide a job description."); return; }
+    if (!resumeText.trim() && !resumeFile) { setFormError("Please provide your resume."); return; }
+    setViewingHistId(null);
+    analyseMut.mutate();
   };
 
   const resumeReady = !!(resumeFile || resumeText.trim());
   const jdReady     = !!(jdFile || jdText.trim());
+  const pageError = formError || (genState.status === "error" ? ((genState.error as any)?.response?.data?.detail || "Analysis failed") : "");
+
+  // Aliases so the render logic below can keep referring to `result`,
+  // `candidateInfo`, `jdInfo` regardless of whether they came from the
+  // live mutation or a manually-selected history entry.
+  const result = displayResult;
+  const candidateInfo = displayResult?.candidateInfo ?? null;
+  const jdInfo = displayResult?.jdInfo ?? null;
 
   return (
     <div>
@@ -248,7 +281,7 @@ export default function CVAnalysisPage() {
         </div>
       </div>
 
-      {error && <div className="tiq-alert tiq-alert-error tiq-mb-4">{error}</div>}
+      {pageError && <div className="tiq-alert tiq-alert-error tiq-mb-4">{pageError}</div>}
 
       {/* ── Input section — ALWAYS VISIBLE ── */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 20 }}>
@@ -281,11 +314,16 @@ export default function CVAnalysisPage() {
       <div style={{ textAlign: "center", marginBottom: 32 }}>
         <button className="tiq-btn tiq-btn-primary"
           style={{ padding: "12px 40px", fontSize: 15, justifyContent: "center" }}
-          onClick={analyse} disabled={loading || !resumeReady || !jdReady}>
-          {loading
+          onClick={runAnalyse} disabled={genState.status === "pending" || !resumeReady || !jdReady}>
+          {genState.status === "pending"
             ? <><span className="tiq-spinner" style={{ width: 16, height: 16, borderWidth: 2 }} /> Analysing…</>
             : <><Sparkles size={16} /> {result ? "Re-analyse" : "Run ATS Analysis"}</>}
         </button>
+        {genState.status === "pending" && (
+          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
+            This keeps running even if you switch to another page.
+          </div>
+        )}
         {!resumeReady || !jdReady ? (
           <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
             {!resumeReady && "Upload or paste resume · "}
@@ -305,7 +343,7 @@ export default function CVAnalysisPage() {
             <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <BrainCircuit size={14} color="var(--violet-500)" /> Past Analyses ({history.length})
             </span>
-            <button onClick={() => { if(confirm("Clear all history?")) { setHistory([]); localStorage.removeItem("cvintel_history"); setResult(null); }}}
+            <button onClick={() => { if(confirm("Clear all history?")) { setHistory([]); localStorage.removeItem("cvintel_history"); setViewingHistId(null); }}}
               style={{ background:"none",border:"none",cursor:"pointer",fontSize:11,color:"var(--rose-500)",display:"flex",alignItems:"center",gap:4 }}>
               <X size={11} /> Clear all
             </button>
@@ -313,12 +351,12 @@ export default function CVAnalysisPage() {
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {history.map(h => (
               <button key={h.id}
-                onClick={() => { setResult(h.result); setSelectedHistId(h.id); }}
+                onClick={() => setViewingHistId(h.id)}
                 style={{
                   padding: "6px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                  background: selectedHistId === h.id ? "rgba(139,92,246,.12)" : "var(--bg-secondary)",
-                  border: selectedHistId === h.id ? "1.5px solid var(--violet-500)" : "1.5px solid var(--border)",
-                  color: selectedHistId === h.id ? "var(--violet-500)" : "var(--text-secondary)",
+                  background: viewingHistId === h.id ? "rgba(139,92,246,.12)" : "var(--bg-secondary)",
+                  border: viewingHistId === h.id ? "1.5px solid var(--violet-500)" : "1.5px solid var(--border)",
+                  color: viewingHistId === h.id ? "var(--violet-500)" : "var(--text-secondary)",
                   display: "flex", alignItems: "center", gap: 6,
                 }}>
                 <span>{h.name}</span>
@@ -328,7 +366,7 @@ export default function CVAnalysisPage() {
                   {h.score}%
                 </span>
                 <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{h.ts}</span>
-                <span onClick={e => { e.stopPropagation(); const updated = history.filter(x => x.id !== h.id); setHistory(updated); localStorage.setItem("cvintel_history", JSON.stringify(updated)); if(selectedHistId === h.id) setResult(null); }}
+                <span onClick={e => { e.stopPropagation(); const updated = history.filter(x => x.id !== h.id); setHistory(updated); localStorage.setItem("cvintel_history", JSON.stringify(updated)); if(viewingHistId === h.id) setViewingHistId(null); }}
                   style={{ color: "var(--text-muted)", cursor: "pointer", display: "flex" }}>
                   <X size={10} />
                 </span>

@@ -2,14 +2,16 @@
 TalentIQ - JD Creator Router
 Generates a detailed, formal Job Description (Position Description) from a
 handful of inputs — role title, employment type, expiry date, required
-skills/experience/education — using Groq LLM for the narrative sections
-(Position Purpose, Organisational Context, Key Responsibilities, Required
-Qualifications, Preferred Qualifications), with a heuristic fallback when no
-LLM key is configured. Company name is pulled from the user's profile
-(Settings), not re-entered. Produces a downloadable .docx via python-docx.
+skills/experience/education. Content is generated ENTIRELY by an LLM (Groq
+first, falling back to a local/self-hosted Ollama instance) — there is no
+hardcoded/templated JD text. If neither LLM is reachable, generation fails
+with a clear error rather than silently returning generic content. Company
+name is pulled from the user's profile (Settings), not re-entered. Produces
+a downloadable .docx via python-docx.
 """
 import io
 import json
+import requests
 from datetime import datetime
 from typing import List, Optional
 
@@ -40,19 +42,11 @@ class JDGenerateRequest(BaseModel):
 
 # ── AI GENERATION ────────────────────────────────────────────────────────
 
-async def _generate_jd_content(
+def _build_jd_prompt(
     role_title: str, company_name: str, job_type: str, skills: List[str],
-    experience: str, education: str, groq_key: Optional[str],
-) -> dict:
-    """Returns position_purpose, organisational_context, responsibilities,
-    required_qualifications, preferred_qualifications, ai_powered."""
-    if groq_key:
-        try:
-            from langchain_groq import ChatGroq
-            from langchain.schema import HumanMessage
-
-            llm = ChatGroq(api_key=groq_key, model="llama3-70b-8192", temperature=0.35)
-            prompt = f"""You are a senior HR specialist writing a detailed, formal Position
+    experience: str, education: str,
+) -> str:
+    return f"""You are a senior HR specialist writing a detailed, formal Position
 Description document, in the style used by large organisations (e.g. universities,
 corporates) — thorough, professional, and specific, not generic filler.
 
@@ -63,10 +57,10 @@ Required skills: {", ".join(skills) if skills else "not specified"}
 Experience required: {experience or "not specified"}
 Education required: {education or "not specified"}
 
-Write the following sections. Be specific to this role — infer plausible,
+Write the following sections. Be specific to THIS role — infer plausible,
 realistic detail from the role title, skills, and experience level given
 (the way a real recruiter would write it), rather than generic statements
-that could apply to any job:
+that could apply to any job. Do not use placeholder text.
 
 1. "position_purpose": ONE professional paragraph (4-6 sentences) describing the
    overall purpose, scope and impact of this role within the organisation.
@@ -90,7 +84,8 @@ that could apply to any job:
    certifications, additional tools, or domain experience that would be a
    bonus but are not mandatory.
 
-Return ONLY valid JSON in this exact format, no markdown, no commentary:
+Return ONLY valid JSON in this exact format, no markdown, no commentary, no
+text before or after the JSON object:
 {{
   "position_purpose": "...",
   "organisational_context": "...",
@@ -99,104 +94,107 @@ Return ONLY valid JSON in this exact format, no markdown, no commentary:
   "preferred_qualifications": ["...", "...", "...", "..."]
 }}"""
 
-            resp = llm.invoke([HumanMessage(content=prompt)])
-            raw = resp.content.strip().replace("```json", "").replace("```", "").strip()
-            data = json.loads(raw)
-            purpose = data.get("position_purpose", "").strip()
-            context = data.get("organisational_context", "").strip()
-            responsibilities = [r for r in data.get("responsibilities", []) if r]
-            required_q = [r for r in data.get("required_qualifications", []) if r]
-            preferred_q = [r for r in data.get("preferred_qualifications", []) if r]
-            if purpose and responsibilities and required_q:
-                return {
-                    "position_purpose": purpose,
-                    "organisational_context": context,
-                    "responsibilities": responsibilities[:15],
-                    "required_qualifications": required_q[:12],
-                    "preferred_qualifications": preferred_q[:8],
-                    "ai_powered": True,
-                }
-        except Exception:
-            pass
-    return _fallback_jd_content(role_title, company_name, job_type, skills, experience, education)
 
+def _parse_jd_json(raw: str) -> Optional[dict]:
+    """Extract and validate the JSON payload from an LLM response."""
+    text = raw.strip()
+    text = text.replace("```json", "").replace("```", "").strip()
+    # Some models wrap the JSON with leading commentary — grab from the first '{'
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1:
+        text = text[start:end + 1]
+    try:
+        data = json.loads(text)
+    except Exception:
+        return None
 
-def _fallback_jd_content(
-    role_title: str, company_name: str, job_type: str, skills: List[str], experience: str, education: str,
-) -> dict:
-    org = company_name or "the organisation"
-    employment_note = ""
-    if job_type and job_type.lower() != "full time":
-        employment_note = f" This is a {job_type.lower()} position."
-    skills_str = ", ".join(skills[:5]) if skills else "the core skills required for this role"
+    purpose = (data.get("position_purpose") or "").strip()
+    context = (data.get("organisational_context") or "").strip()
+    responsibilities = [r for r in data.get("responsibilities", []) if r]
+    required_q = [r for r in data.get("required_qualifications", []) if r]
+    preferred_q = [r for r in data.get("preferred_qualifications", []) if r]
 
-    purpose = (
-        f"The {role_title} plays a key role in supporting {org}'s ongoing operations and "
-        f"strategic objectives.{employment_note} This position is responsible for applying relevant expertise "
-        f"and experience to deliver high-quality outcomes, working collaboratively with "
-        f"stakeholders across the business. The successful candidate will bring "
-        f"{experience or 'relevant professional experience'} and a strong grasp of "
-        f"{skills_str} to drive results and support the team's goals. This role requires "
-        f"sound judgement, strong problem-solving ability, and a proactive approach to "
-        f"identifying and addressing challenges as they arise."
-    )
-
-    context = (
-        f"This role sits within a team at {org} that is responsible for delivering outcomes "
-        f"aligned with the organisation's broader strategic priorities. The {role_title} works "
-        f"closely with internal stakeholders and, where relevant, external partners and suppliers "
-        f"to ensure work is delivered to a high standard, on time, and in line with agreed objectives."
-    )
-
-    responsibilities = [
-        f"Deliver day-to-day responsibilities associated with the {role_title} role to a consistently high standard.",
-        (f"Apply hands-on expertise in {skills_str} to deliver project and business outcomes."
-         if skills else "Apply relevant technical and professional expertise to deliver business outcomes."),
-        "Collaborate with cross-functional stakeholders to plan, prioritise, and achieve team and organisational objectives.",
-        "Maintain accurate documentation, records, and reporting relevant to the role's responsibilities.",
-        "Identify opportunities for process improvement and contribute to best-practice initiatives across the team.",
-        "Communicate clearly and effectively with colleagues, management, and external stakeholders as required.",
-        "Ensure compliance with organisational policies, procedures, and relevant industry regulations.",
-        "Support continuous professional development and stay current with relevant industry trends and tools.",
-        "Contribute to planning and prioritisation activities, providing input based on subject-matter expertise.",
-        "Escalate risks, issues, and blockers in a timely manner, proposing practical solutions where possible.",
-        "Support onboarding, training, or knowledge-sharing activities with colleagues where relevant.",
-        "Undertake other duties as reasonably required and appropriate to the level and scope of this role.",
-    ]
-
-    required_qualifications = []
-    if experience:
-        required_qualifications.append(f"{experience} of relevant professional experience in a similar role.")
-    else:
-        required_qualifications.append("Demonstrated professional experience in a similar role.")
-    if skills:
-        for s in skills[:6]:
-            required_qualifications.append(f"Strong hands-on expertise in {s}.")
-    if education:
-        required_qualifications.append(f"{education}, or equivalent demonstrated knowledge and experience.")
-    else:
-        required_qualifications.append("Relevant tertiary qualification, or equivalent demonstrated knowledge and experience.")
-    required_qualifications += [
-        "Excellent written and verbal communication skills, with the ability to engage effectively with stakeholders at all levels.",
-        "Strong analytical and problem-solving skills, with sound judgement and attention to detail.",
-        "Proven ability to manage competing priorities and deliver quality outcomes within agreed timeframes.",
-    ]
-
-    preferred_qualifications = [
-        "Relevant industry certification(s) related to the role's core skill areas.",
-        "Prior experience working in a similar industry or domain.",
-        "Experience working within a formalised project delivery or governance environment.",
-        "Demonstrated experience mentoring or supporting the development of junior colleagues.",
-    ]
+    if not (purpose and responsibilities and required_q):
+        return None
 
     return {
         "position_purpose": purpose,
         "organisational_context": context,
-        "responsibilities": responsibilities,
-        "required_qualifications": required_qualifications[:12],
-        "preferred_qualifications": preferred_qualifications,
-        "ai_powered": False,
+        "responsibilities": responsibilities[:15],
+        "required_qualifications": required_q[:12],
+        "preferred_qualifications": preferred_q[:8],
     }
+
+
+def _call_groq(prompt: str, groq_key: str) -> str:
+    from langchain_groq import ChatGroq
+    from langchain.schema import HumanMessage
+
+    llm = ChatGroq(api_key=groq_key, model="llama3-70b-8192", temperature=0.35)
+    resp = llm.invoke([HumanMessage(content=prompt)])
+    return resp.content
+
+
+def _call_ollama(prompt: str, base_url: str, model: str) -> str:
+    url = base_url.rstrip("/") + "/api/generate"
+    # Explicitly bypass any HTTP_PROXY/HTTPS_PROXY env vars for this call —
+    # otherwise `requests` can route localhost/private Ollama traffic through
+    # a system proxy (which 404s it), even though curl reaches it directly.
+    resp = requests.post(
+        url,
+        json={"model": model, "prompt": prompt, "stream": False, "format": "json"},
+        timeout=120,
+        proxies={"http": None, "https": None},
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("response", "")
+
+
+async def _generate_jd_content(
+    role_title: str, company_name: str, job_type: str, skills: List[str],
+    experience: str, education: str,
+    groq_key: Optional[str], ollama_base_url: Optional[str], ollama_model: Optional[str],
+) -> dict:
+    """Generates JD content using an LLM only — Groq first, then Ollama.
+    Raises HTTPException if no LLM is available or both fail."""
+    prompt = _build_jd_prompt(role_title, company_name, job_type, skills, experience, education)
+
+    errors = []
+
+    if groq_key:
+        try:
+            raw = _call_groq(prompt, groq_key)
+            parsed = _parse_jd_json(raw)
+            if parsed:
+                parsed["ai_powered"] = True
+                parsed["llm_provider"] = "groq"
+                return parsed
+            errors.append("Groq returned an unparseable response.")
+        except Exception as e:
+            errors.append(f"Groq error: {str(e)[:150]}")
+
+    ollama_url = ollama_base_url or "http://localhost:11434"
+    ollama_mdl = ollama_model or "llama3"
+    try:
+        raw = _call_ollama(prompt, ollama_url, ollama_mdl)
+        parsed = _parse_jd_json(raw)
+        if parsed:
+            parsed["ai_powered"] = True
+            parsed["llm_provider"] = "ollama"
+            return parsed
+        errors.append("Ollama returned an unparseable response.")
+    except Exception as e:
+        errors.append(f"Ollama ({ollama_url}) error: {str(e)[:150]}")
+
+    raise HTTPException(
+        400,
+        "Could not generate the JD — no LLM is available. Add a Groq API key in "
+        "Settings > API Keys (service: groq), or run Ollama locally (or point "
+        "Settings > API Keys, service: ollama, key: base_url, at a reachable "
+        f"instance) with a model pulled (e.g. `ollama pull llama3`). Details: {'; '.join(errors)}"
+    )
 
 
 def _fmt(d: JDDocument) -> dict:
@@ -217,6 +215,7 @@ def _fmt(d: JDDocument) -> dict:
         "required_qualifications": d.required_qualifications or [],
         "preferred_qualifications": d.preferred_qualifications or [],
         "ai_powered": d.ai_powered,
+        "llm_provider": d.llm_provider or "",
         "created_at": d.created_at.isoformat() if d.created_at else None,
     }
 
@@ -384,9 +383,19 @@ async def generate_jd(
     )
     groq_key = next((k.key_value for k in kr.scalars().all() if k.key_name == "api_key"), None)
 
+    orow = await db.execute(
+        select(UserAPIKey).where(
+            UserAPIKey.user_id == current_user.id,
+            UserAPIKey.service == "ollama",
+        )
+    )
+    ollama_keys = {k.key_name: k.key_value for k in orow.scalars().all()}
+    ollama_base_url = ollama_keys.get("base_url")
+    ollama_model = ollama_keys.get("model")
+
     content = await _generate_jd_content(
         payload.role_title, current_user.company or "", payload.job_type, payload.skills_required,
-        payload.experience_required, payload.education_required, groq_key,
+        payload.experience_required, payload.education_required, groq_key, ollama_base_url, ollama_model,
     )
 
     doc = JDDocument(
@@ -406,6 +415,7 @@ async def generate_jd(
         required_qualifications=content.get("required_qualifications", []),
         preferred_qualifications=content.get("preferred_qualifications", []),
         ai_powered=content["ai_powered"],
+        llm_provider=content.get("llm_provider", ""),
         created_at=datetime.utcnow(),
     )
     db.add(doc)

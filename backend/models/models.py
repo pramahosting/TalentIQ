@@ -347,6 +347,7 @@ class JDDocument(Base):
     required_qualifications = Column(JSON, default=list)   # AI-generated rich bullet list
     preferred_qualifications = Column(JSON, default=list)  # AI-generated nice-to-have bullet list
     ai_powered          = Column(Boolean, default=False)
+    llm_provider        = Column(String(20))   # "groq" or "ollama"
     created_at          = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="jd_documents")

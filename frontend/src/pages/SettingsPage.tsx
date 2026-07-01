@@ -41,6 +41,7 @@ export default function SettingsPage() {
   const [groq, setGroq] = useState({ api_key: "" });
   const [linkedin, setLinkedin] = useState({ email: "", password: "" });
   const [smtp, setSmtp] = useState({ host: "", port: "587", username: "", password: "", from_email: "" });
+  const [ollama, setOllama] = useState({ base_url: "http://localhost:11434", model: "llama3" });
   const [keyMsg, setKeyMsg] = useState("");
 
   const flashMsg = (m: string) => { setKeyMsg(m); setTimeout(() => setKeyMsg(""), 3000); };
@@ -197,6 +198,23 @@ export default function SettingsPage() {
             </div>
             <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("linkedin", linkedin)} disabled={savingService === "linkedin"}>
               {savingService === "linkedin" ? "Saving…" : "Save LinkedIn Credentials"}
+            </button>
+          </div>
+
+          {/* OLLAMA */}
+          <div className="tiq-card tiq-mb-6">
+            <div className="tiq-card-title">Ollama — Local/Self-Hosted LLM</div>
+            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
+              Used as a fallback for JD Creator when no Groq key is set. Requires{" "}
+              <a href="https://ollama.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>Ollama</a>{" "}
+              running locally (or reachable at the URL below) with a model pulled, e.g. <code>ollama pull llama3</code>.
+            </p>
+            <div className="tiq-grid-2">
+              {inp("Base URL", ollama.base_url, v => setOllama(o => ({ ...o, base_url: v })), "text", "http://localhost:11434")}
+              {inp("Model", ollama.model, v => setOllama(o => ({ ...o, model: v })), "text", "llama3")}
+            </div>
+            <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("ollama", ollama)} disabled={savingService === "ollama"}>
+              {savingService === "ollama" ? "Saving…" : "Save Ollama Settings"}
             </button>
           </div>
 

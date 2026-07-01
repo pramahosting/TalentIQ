@@ -22,6 +22,7 @@ MIGRATIONS = [
     "ALTER TABLE tiq_jd_documents ADD COLUMN IF NOT EXISTS organisational_context TEXT",
     "ALTER TABLE tiq_jd_documents ADD COLUMN IF NOT EXISTS required_qualifications JSON DEFAULT '[]'",
     "ALTER TABLE tiq_jd_documents ADD COLUMN IF NOT EXISTS preferred_qualifications JSON DEFAULT '[]'",
+    "ALTER TABLE tiq_jd_documents ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(20)",
     "CREATE UNIQUE INDEX IF NOT EXISTS ix_tiq_joblens_candidates_interview_token ON tiq_joblens_candidates (interview_token)",
     "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS emotion_disgust INTEGER DEFAULT 0",
     "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS emotion_surprise INTEGER DEFAULT 0",

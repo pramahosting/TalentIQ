@@ -1,5 +1,5 @@
 import { } from "react-router-dom";
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { BarChart2, Play, RefreshCw, ExternalLink, Trash2, TrendingUp, Award } from "lucide-react";
 import {
@@ -7,6 +7,7 @@ import {
   PieChart, Pie, Cell, Legend,
 } from "recharts";
 import { jobintelApi } from "../lib/api";
+import { useLatestMutation } from "../hooks/useLatestMutation";
 
 const PIE_COLORS = ["#00c7b7","#8b5cf6","#f59e0b","#f43f5e","#3b82f6","#10b981","#ec4899","#06b6d4","#84cc16","#f97316"];
 
@@ -65,6 +66,7 @@ export default function MarketIntelPage() {
   });
 
   const runMutation = useMutation({
+    mutationKey: ["jobintel-run"],
     mutationFn: () => jobintelApi.runAnalysis({
       role: domain,
       location: country,
@@ -76,6 +78,22 @@ export default function MarketIntelPage() {
       setSelectedRunId(data.id);
     },
   });
+
+  // Shared-cache view of the same mutation — lets the run survive the user
+  // switching to another agent page while it's kicking off, and auto-selects
+  // it here again whenever they come back, regardless of which mount
+  // originally triggered it. (The run itself is already tracked server-side
+  // and polled via refetchInterval above, so this only affects convenience
+  // auto-selection, not data loss.)
+  const runState = useLatestMutation<any>(["jobintel-run"]);
+  const lastSeenRunId = useRef<number | null>(null);
+  useEffect(() => {
+    if (runState.status === "success" && runState.data?.id && runState.data.id !== lastSeenRunId.current) {
+      lastSeenRunId.current = runState.data.id;
+      qc.invalidateQueries({ queryKey: ["intel-runs"] });
+      setSelectedRunId(runState.data.id);
+    }
+  }, [runState.status, runState.data?.id, qc]);
 
   const deleteMutation = useMutation({
     mutationFn: (id: number) => jobintelApi.deleteRun(id),
@@ -134,9 +152,9 @@ export default function MarketIntelPage() {
               </select>
             </div>
             <button className="tiq-btn tiq-btn-primary" onClick={() => runMutation.mutate()}
-              disabled={runMutation.isPending} style={{ height: 38 }}>
+              disabled={runState.status === "pending"} style={{ height: 38 }}>
               <Play size={14} />
-              {runMutation.isPending ? "Starting…" : "Run"}
+              {runState.status === "pending" ? "Starting…" : "Run"}
             </button>
           </div>
         </div>

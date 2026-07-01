@@ -1,8 +1,9 @@
 import { } from "react-router-dom";
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Upload, Search, Target, Download, ExternalLink, ChevronDown, ChevronUp, FileText, Trash2 } from "lucide-react";
 import { jobhuntApi, downloadBlob } from "../lib/api";
+import { useLatestMutation } from "../hooks/useLatestMutation";
 
 export default function JobHunterPage() {
   const qc = useQueryClient();
@@ -27,19 +28,24 @@ export default function JobHunterPage() {
     role: "", location: "", job_type: "All",
     salary_min: "", salary_max: "", industry: "",
   });
-  const [currentSearch, setCurrentSearch] = useState<any>(null);
-
   const searchMutation = useMutation({
+    mutationKey: ["jobhunt-search"],
     mutationFn: () => jobhuntApi.searchJobs({
       ...searchForm,
       salary_min: searchForm.salary_min ? parseInt(searchForm.salary_min) : null,
       salary_max: searchForm.salary_max ? parseInt(searchForm.salary_max) : null,
     }),
-    onSuccess: (data) => {
-      setCurrentSearch(data);
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["searches"] });
     },
   });
+
+  // Shared-cache view of the same mutation — lets the search survive the
+  // user switching to another agent page while jobs are still being
+  // scraped, and shows the result here again whenever they come back,
+  // regardless of which mount originally triggered it.
+  const searchState = useLatestMutation<any>(["jobhunt-search"]);
+  const currentSearch = searchState.status === "success" ? searchState.data ?? null : null;
 
   // Match
   const deleteMutation = useMutation({
@@ -53,12 +59,23 @@ export default function JobHunterPage() {
   });
 
   const matchMutation = useMutation({
+    mutationKey: ["jobhunt-match"],
     mutationFn: () => jobhuntApi.matchResume({ resume_id: selectedResumeId!, search_id: currentSearch!.id }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["matches"] });
       setTab("matches");
     },
   });
+
+  const matchState = useLatestMutation<any>(["jobhunt-match"]);
+  const lastSeenMatch = useRef<number | null>(null);
+  useEffect(() => {
+    if (matchState.status === "success" && matchState.submittedAt && matchState.submittedAt !== lastSeenMatch.current) {
+      lastSeenMatch.current = matchState.submittedAt;
+      qc.invalidateQueries({ queryKey: ["matches"] });
+      setTab("matches");
+    }
+  }, [matchState.status, matchState.submittedAt, qc]);
 
   const { data: matches = [], isLoading: matchLoading } = useQuery({
     queryKey: ["matches"],
@@ -181,19 +198,19 @@ export default function JobHunterPage() {
               <button
                 className="tiq-btn tiq-btn-primary"
                 onClick={() => searchMutation.mutate()}
-                disabled={!searchForm.role || searchMutation.isPending}
+                disabled={!searchForm.role || searchState.status === "pending"}
               >
                 <Search size={14} />
-                {searchMutation.isPending ? "Searching…" : "Search jobs"}
+                {searchState.status === "pending" ? "Searching…" : "Search jobs"}
               </button>
               {currentSearch && selectedResumeId && (
                 <button
                   className="tiq-btn tiq-btn-outline"
                   onClick={() => matchMutation.mutate()}
-                  disabled={matchMutation.isPending}
+                  disabled={matchState.status === "pending"}
                 >
                   <Target size={14} />
-                  {matchMutation.isPending ? "Matching…" : "Match my resume"}
+                  {matchState.status === "pending" ? "Matching…" : "Match my resume"}
                 </button>
               )}
               {currentSearch && (
@@ -207,9 +224,14 @@ export default function JobHunterPage() {
                 </button>
               )}
             </div>
-            {searchMutation.isError && (
+            {searchState.status === "pending" && (
+              <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
+                This keeps running even if you switch to another page.
+              </div>
+            )}
+            {searchState.status === "error" && (
               <div className="tiq-alert tiq-alert-error" style={{ marginTop: 12 }}>
-                Search failed: {(searchMutation.error as any)?.response?.data?.detail || (searchMutation.error as any)?.message || "Unknown error. Check the backend logs."}
+                Search failed: {(searchState.error as any)?.response?.data?.detail || (searchState.error as any)?.message || "Unknown error. Check the backend logs."}
               </div>
             )}
             {uploadMutation.isError && (
