@@ -83,7 +83,16 @@ export default function HistoryDropdown({
           ) : options.map(opt => (
             <div
               key={opt.id}
-              onClick={() => { onChange(opt.id); setOpen(false); }}
+              onMouseDown={e => {
+                // mousedown (not click) so this fires and commits the
+                // selection deterministically, before the document-level
+                // outside-click listener (also mousedown-based) or any
+                // blur/focus side effects from the trigger button can race
+                // with it and swallow the selection.
+                e.preventDefault();
+                onChange(opt.id);
+                setOpen(false);
+              }}
               style={{
                 display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8,
                 padding: "8px 10px", cursor: "pointer", fontSize: 13,
@@ -97,7 +106,7 @@ export default function HistoryDropdown({
                 {opt.label}
               </span>
               <span
-                onClick={e => handleDelete(e, opt.id)}
+                onMouseDown={e => { e.preventDefault(); e.stopPropagation(); handleDelete(e, opt.id); }}
                 style={{ color: "#9ca3af", cursor: "pointer", display: "flex", flexShrink: 0, padding: 2 }}
                 title="Delete"
               >

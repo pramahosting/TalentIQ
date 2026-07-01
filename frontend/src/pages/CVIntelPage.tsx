@@ -1,12 +1,12 @@
 import { useState, useRef, useEffect } from "react";
 import { } from "react-router-dom";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   BrainCircuit, FileText, Target, CheckCircle, AlertTriangle,
   TrendingUp, Upload, X, Sparkles, ChevronDown, ChevronUp,
   User, MapPin, Briefcase, List,
 } from "lucide-react";
-import { api } from "../lib/api";
+import { api, cvintelApi } from "../lib/api";
 import { useLatestMutation } from "../hooks/useLatestMutation";
 
 interface AnalysisResult {
@@ -183,9 +183,24 @@ export default function CVAnalysisPage() {
   const [jdFile, setJdFile] = useState<File | null>(null);
 
   const [formError, setFormError] = useState("");
-  const [history, setHistory] = useState<Array<{id: number; name: string; score: number; result: AnalyseData; ts: string}>>(() => {
-    try { return JSON.parse(localStorage.getItem("cvintel_history") || "[]"); } catch { return []; }
+  const qc = useQueryClient();
+
+  // History now lives server-side (survives browsers/devices/refresh),
+  // matching every other module. Normalize the backend shape into the
+  // same {id, name, score, result, ts} shape the render logic below uses.
+  const { data: historyRaw = [] } = useQuery({
+    queryKey: ["cvintel-history"],
+    queryFn: cvintelApi.listHistory,
   });
+  const history: Array<{ id: number; name: string; score: number; result: AnalyseData; ts: string }> =
+    historyRaw.map((r: any) => ({
+      id: r.id,
+      name: r.sourceName || "Resume",
+      score: r.overallScore,
+      result: { ...r.result, candidateInfo: r.candidateInfo, jdInfo: r.jdInfo, sourceName: r.sourceName },
+      ts: r.createdAt ? new Date(r.createdAt).toLocaleString() : "",
+    }));
+
   // null = "show the live/latest analysis"; set when the user manually
   // browses a past entry from the History strip below.
   const [viewingHistId, setViewingHistId] = useState<number | null>(null);
@@ -225,7 +240,7 @@ export default function CVAnalysisPage() {
     ? history.find(h => h.id === viewingHistId)?.result ?? null
     : liveResult;
 
-  // Save each newly-completed analysis into local history. Driven off the
+  // Save each newly-completed analysis to the backend. Driven off the
   // shared cache (not the mutation's own onSuccess) so it reliably fires
   // even if this page was unmounted when the request actually finished.
   const lastSavedSubmittedAt = useRef<number | null>(null);
@@ -234,21 +249,19 @@ export default function CVAnalysisPage() {
         && genState.submittedAt !== lastSavedSubmittedAt.current) {
       lastSavedSubmittedAt.current = genState.submittedAt;
       const data = genState.data;
-      const entry = {
-        id: Date.now(),
-        name: data.sourceName || "Resume",
-        score: data.overallScore,
-        result: data,
-        ts: new Date().toLocaleString(),
-      };
-      setHistory(prev => {
-        const updated = [entry, ...prev].slice(0, 20); // keep last 20
-        localStorage.setItem("cvintel_history", JSON.stringify(updated));
-        return updated;
-      });
+      const { candidateInfo, jdInfo, sourceName, ...bareResult } = data;
+      cvintelApi.saveHistory({
+        source_name: sourceName || "Resume",
+        overall_score: data.overallScore,
+        result: bareResult,
+        candidate_info: candidateInfo || {},
+        jd_info: jdInfo || {},
+      }).then(() => {
+        qc.invalidateQueries({ queryKey: ["cvintel-history"] });
+      }).catch(() => { /* non-fatal — the on-screen result is still shown */ });
       setViewingHistId(null);
     }
-  }, [genState.status, genState.submittedAt, genState.data]);
+  }, [genState.status, genState.submittedAt, genState.data, qc]);
 
   const runAnalyse = () => {
     setFormError("");
@@ -343,7 +356,7 @@ export default function CVAnalysisPage() {
             <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <BrainCircuit size={14} color="var(--violet-500)" /> Past Analyses ({history.length})
             </span>
-            <button onClick={() => { if(confirm("Clear all history?")) { setHistory([]); localStorage.removeItem("cvintel_history"); setViewingHistId(null); }}}
+            <button onClick={() => { if(confirm("Clear all history?")) { cvintelApi.deleteAllHistory().then(() => qc.invalidateQueries({ queryKey: ["cvintel-history"] })); setViewingHistId(null); }}}
               style={{ background:"none",border:"none",cursor:"pointer",fontSize:11,color:"var(--rose-500)",display:"flex",alignItems:"center",gap:4 }}>
               <X size={11} /> Clear all
             </button>
@@ -366,7 +379,7 @@ export default function CVAnalysisPage() {
                   {h.score}%
                 </span>
                 <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{h.ts}</span>
-                <span onClick={e => { e.stopPropagation(); const updated = history.filter(x => x.id !== h.id); setHistory(updated); localStorage.setItem("cvintel_history", JSON.stringify(updated)); if(viewingHistId === h.id) setViewingHistId(null); }}
+                <span onClick={e => { e.stopPropagation(); cvintelApi.deleteHistoryItem(h.id).then(() => qc.invalidateQueries({ queryKey: ["cvintel-history"] })); if(viewingHistId === h.id) setViewingHistId(null); }}
                   style={{ color: "var(--text-muted)", cursor: "pointer", display: "flex" }}>
                   <X size={10} />
                 </span>

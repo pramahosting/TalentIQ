@@ -99,3 +99,10 @@ export const jdcreatorApi = {
   download: (id: number) =>
     api.get(`/api/jdcreator/documents/${id}/download`, { responseType: "blob" }).then(r => r.data),
 };
+
+export const cvintelApi = {
+  saveHistory: (data: any) => api.post("/api/cvintel/history", data).then(r => r.data),
+  listHistory: () => api.get("/api/cvintel/history").then(r => r.data),
+  deleteHistoryItem: (id: number) => api.delete(`/api/cvintel/history/${id}`).then(r => r.data),
+  deleteAllHistory: () => api.delete("/api/cvintel/history").then(r => r.data),
+};
