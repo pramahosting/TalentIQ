@@ -255,6 +255,10 @@ class DashboardStats(BaseModel):
     total_matches: int
     avg_ats_score: float
     total_intel_runs: int
+    total_intel_jobs: int = 0
     total_linkedin_searches: int
     total_profiles_found: int
+    total_joblens_sessions: int = 0
+    total_candidates: int = 0
+    avg_candidate_score: float = 0.0
     recent_activity: List[Any] = []
