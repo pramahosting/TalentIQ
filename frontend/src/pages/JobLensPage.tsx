@@ -26,6 +26,8 @@ const jobLensApi = {
     api.get(`/api/joblens/sessions/${sid}/export`, { responseType: "blob" }).then(r => r.data),
   prepareInvite: (cid: number) =>
     api.post(`/api/joblens/candidates/${cid}/prepare-invite`).then(r => r.data),
+  getMorphcastKey: () =>
+    api.get(`/api/joblens/morphcast-key`).then(r => r.data),
   markContacted: (cid: number) =>
     api.post(`/api/joblens/candidates/${cid}/mark-contacted`).then(r => r.data),
 };
@@ -101,7 +103,9 @@ declare global {
   interface Window { CY?: any; MphTools?: any; }
 }
 
-const MORPHCAST_LICENSE = ""; // optional — leave blank to use trial/dev mode
+// License key is fetched at runtime from Settings > API Keys (service:
+// morphcast) via jobLensApi.getMorphcastKey() — MorphCast's SDK now
+// requires a real key on every load, there's no keyless trial mode.
 
 function loadMorphcastScripts(): Promise<void> {
   function load(src: string, dataConfig?: string) {
@@ -152,6 +156,17 @@ function VideoInterviewModal({
   const [avgAgg, setAvgAgg] = useState<EmotionAgg>({ ...EMPTY_EMO });
   const [samples, setSamples] = useState(0);
   const [dominant, setDominant] = useState("Neutral");
+  const [licenseKey, setLicenseKey] = useState("");
+  const [keyChecked, setKeyChecked] = useState(false);
+
+  // Fetch the recruiter's MorphCast key as soon as the modal mounts, so
+  // it's ready by the time Start Interview triggers initMorphcast().
+  useEffect(() => {
+    jobLensApi.getMorphcastKey()
+      .then(r => setLicenseKey(r.license_key || ""))
+      .catch(() => setLicenseKey(""))
+      .finally(() => setKeyChecked(true));
+  }, []);
 
   // Keep ref in sync so the MorphCast event handler (closure) sees current value
   isRecordingRef.current = recording;
@@ -176,6 +191,10 @@ function VideoInterviewModal({
   };
 
   const initMorphcast = async () => {
+    if (keyChecked && !licenseKey) {
+      setMcStatus("Emotion AI not configured (add a free MorphCast license key in Settings > API Keys) — interview will continue without facial analysis.");
+      return;
+    }
     try {
       await loadMorphcastScripts();
       window.MphTools?.CompatibilityAutoCheck?.run?.();
@@ -188,7 +207,7 @@ function VideoInterviewModal({
         .addModule(CY.modules().FACE_DETECTOR.name)
         .addModule(CY.modules().FACE_EMOTION.name)
         .source(source);
-      if (MORPHCAST_LICENSE) loader = loader.licenseKey(MORPHCAST_LICENSE);
+      if (licenseKey) loader = loader.licenseKey(licenseKey);
 
       const engine = await loader.load();
       engineRef.current = engine;
@@ -337,14 +356,18 @@ function VideoInterviewModal({
           )}
         </div>
 
-        <div style={{ fontSize: 11, color: mcReady ? "#0d9488" : "#6b7280", marginTop: 8 }}>
-          {mcStatus}
-        </div>
+        {started && (
+          <div style={{ fontSize: 11, color: mcReady ? "#0d9488" : "#6b7280", marginTop: 8 }}>
+            {mcStatus}
+          </div>
+        )}
 
-        <div style={{ margin: "16px 0", padding: 14, background: "#f3f4f6", borderRadius: 10, borderLeft: "4px solid #0d9488" }}>
-          <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>Question {qIdx + 1} / {questions.length}</div>
-          <div style={{ fontSize: 15, fontWeight: 600, color: "#111827" }}>{currentQ}</div>
-        </div>
+        {started && (
+          <div style={{ margin: "16px 0", padding: 14, background: "#f3f4f6", borderRadius: 10, borderLeft: "4px solid #0d9488" }}>
+            <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>Question {qIdx + 1} / {questions.length}</div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: "#111827" }}>{currentQ}</div>
+          </div>
+        )}
 
         {recording && (
           <div style={{ textAlign: "center", marginBottom: 16 }}>
@@ -453,11 +476,11 @@ HR Team`
 
 // ─── CANDIDATE ROW ─────────────────────────────────────────────────────────
 type PopoverKind = "resume" | "matched" | "missing";
-type PopoverState = { kind: PopoverKind; x: number; y: number } | null;
+type PopoverState = { kind: PopoverKind; x: number; y: number; width: number } | null;
 
 function CandidateRow({
-  c, rank, sessionId, lowT, highT, onRefresh
-}: { c: any; rank: number; sessionId: number; lowT: number; highT: number; onRefresh: () => void }) {
+  c, rank, sessionId, lowT, highT, onRefresh, theadRef
+}: { c: any; rank: number; sessionId: number; lowT: number; highT: number; onRefresh: () => void; theadRef: React.RefObject<HTMLTableSectionElement> }) {
   const [expanded, setExpanded] = useState(false);
   const [interviewOpen, setInterviewOpen] = useState(false);
   const [questions, setQuestions] = useState<string[]>(c.interview_questions || []);
@@ -513,8 +536,16 @@ function CandidateRow({
   };
 
   const openPopover = (kind: PopoverKind) => (e: React.MouseEvent) => {
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setPopover({ kind, x: rect.left, y: rect.bottom + 6 });
+    const cell = (e.currentTarget as HTMLElement).closest("td");
+    const cellRect = cell?.getBoundingClientRect();
+    const headerBottom = theadRef.current?.getBoundingClientRect().bottom;
+    if (!cellRect) return;
+    setPopover({
+      kind,
+      x: cellRect.left,
+      y: headerBottom ?? cellRect.bottom + 6,
+      width: cellRect.width,
+    });
   };
 
   const resumeSummary: string[] = c.resume_summary || [];
@@ -701,7 +732,7 @@ function CandidateRow({
       )}
 
       {popover?.kind === "resume" && (
-        <AnchoredPopover x={popover.x} y={popover.y} width={320} onClose={() => setPopover(null)}>
+        <AnchoredPopover x={popover.x} y={popover.y} width={popover.width} onClose={() => setPopover(null)}>
           <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 8 }}>Full Resume Summary</div>
           <ol style={{ margin: 0, paddingLeft: 16, fontSize: 11, lineHeight: 1.6 }}>
             {resumeSummary.map((s, i) => <li key={i} style={{ marginBottom: 4 }}>{s}</li>)}
@@ -710,7 +741,7 @@ function CandidateRow({
       )}
 
       {popover?.kind === "matched" && (
-        <AnchoredPopover x={popover.x} y={popover.y} width={280} onClose={() => setPopover(null)}>
+        <AnchoredPopover x={popover.x} y={popover.y} width={popover.width} onClose={() => setPopover(null)}>
           <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 8 }}>All Key Strengths</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {(c.matched_skills || []).map((s: string) => (
@@ -721,7 +752,7 @@ function CandidateRow({
       )}
 
       {popover?.kind === "missing" && (
-        <AnchoredPopover x={popover.x} y={popover.y} width={280} onClose={() => setPopover(null)}>
+        <AnchoredPopover x={popover.x} y={popover.y} width={popover.width} onClose={() => setPopover(null)}>
           <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 8 }}>All Considerations</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {(c.missing_skills || []).map((s: string) => (
@@ -746,6 +777,7 @@ export default function JobLensPage() {
   const [tab, setTab] = useState<"new"|"history">("new");
   const jdFileRef = useRef<HTMLInputElement>(null);
   const cvFileRef = useRef<HTMLInputElement>(null);
+  const theadRef = useRef<HTMLTableSectionElement>(null);
 
   const deleteMutation = useMutation({
     mutationFn: (id: number) => jobLensApi.deleteSession(id),
@@ -1057,7 +1089,7 @@ export default function JobLensPage() {
                 </div>
                 <div style={{ overflowX: "auto" }}>
                   <table className="tiq-table" style={{ minWidth: 1100, width: "100%" }}>
-                    <thead>
+                    <thead ref={theadRef}>
                       <tr>
                         <th>#</th>
                         <th>Candidate</th>
@@ -1081,6 +1113,7 @@ export default function JobLensPage() {
                           lowT={activeSession.low_threshold}
                           highT={activeSession.high_threshold}
                           onRefresh={refetchSession}
+                          theadRef={theadRef}
                         />
                       ))}
                     </tbody>

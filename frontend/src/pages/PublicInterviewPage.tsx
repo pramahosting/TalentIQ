@@ -11,7 +11,8 @@ declare global {
   interface Window { CY?: any; MphTools?: any; }
 }
 
-const MORPHCAST_LICENSE = "";
+// License key is fetched at runtime via the public token endpoint below —
+// MorphCast's SDK now requires a real key on every load.
 
 function loadMorphcastScripts(): Promise<void> {
   function load(src: string, dataConfig?: string) {
@@ -64,6 +65,8 @@ export default function PublicInterviewPage() {
   const [avgAgg, setAvgAgg] = useState<EmotionAgg>({ ...EMPTY_EMO });
   const [samples, setSamples] = useState(0);
   const [dominant, setDominant] = useState("Neutral");
+  const [licenseKey, setLicenseKey] = useState("");
+  const [keyChecked, setKeyChecked] = useState(false);
 
   isRecordingRef.current = recording;
 
@@ -77,6 +80,14 @@ export default function PublicInterviewPage() {
       })
       .catch(() => setLoadError("This interview link is invalid or has expired. Please contact the recruiter for a new link."))
       .finally(() => setLoading(false));
+  }, [token]);
+
+  useEffect(() => {
+    if (!token) return;
+    publicApi.get(`/api/joblens/public/interview/${token}/morphcast-key`)
+      .then(r => setLicenseKey(r.data.license_key || ""))
+      .catch(() => setLicenseKey(""))
+      .finally(() => setKeyChecked(true));
   }, [token]);
 
   const startCamera = async () => {
@@ -99,6 +110,10 @@ export default function PublicInterviewPage() {
   };
 
   const initMorphcast = async () => {
+    if (keyChecked && !licenseKey) {
+      setMcStatus("Continuing without facial analysis (not configured by the recruiter).");
+      return;
+    }
     try {
       await loadMorphcastScripts();
       window.MphTools?.CompatibilityAutoCheck?.run?.();
@@ -110,7 +125,7 @@ export default function PublicInterviewPage() {
         .addModule(CY.modules().FACE_DETECTOR.name)
         .addModule(CY.modules().FACE_EMOTION.name)
         .source(source);
-      if (MORPHCAST_LICENSE) loader = loader.licenseKey(MORPHCAST_LICENSE);
+      if (licenseKey) loader = loader.licenseKey(licenseKey);
 
       const engine = await loader.load();
       engineRef.current = engine;
@@ -308,14 +323,18 @@ export default function PublicInterviewPage() {
           )}
         </div>
 
-        <div style={{ fontSize: 11, color: mcReady ? "#0d9488" : "#6b7280", marginTop: 8 }}>
-          {mcStatus}
-        </div>
+        {started && (
+          <div style={{ fontSize: 11, color: mcReady ? "#0d9488" : "#6b7280", marginTop: 8 }}>
+            {mcStatus}
+          </div>
+        )}
 
-        <div style={{ margin: "16px 0", padding: 14, background: "#f3f4f6", borderRadius: 10, borderLeft: "4px solid #0d9488" }}>
-          <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>Question {qIdx + 1} / {questions.length}</div>
-          <div style={{ fontSize: 15, fontWeight: 600 }}>{currentQ}</div>
-        </div>
+        {started && (
+          <div style={{ margin: "16px 0", padding: 14, background: "#f3f4f6", borderRadius: 10, borderLeft: "4px solid #0d9488" }}>
+            <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>Question {qIdx + 1} / {questions.length}</div>
+            <div style={{ fontSize: 15, fontWeight: 600 }}>{currentQ}</div>
+          </div>
+        )}
 
         {recording && (
           <div style={{ textAlign: "center", marginBottom: 16 }}>

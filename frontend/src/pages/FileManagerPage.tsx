@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Database, Table, ChevronRight, Save, Trash2, Plus, Search, Play, RefreshCw, ChevronLeft, ChevronDown, ChevronUp, X } from "lucide-react";
+import DataTable from "../components/DataTable";
 
 const adminApi = {
   tables: () => api.get("/api/admin/tables").then(r => r.data),
@@ -186,42 +187,25 @@ export default function FileManagerPage() {
 
                   {rowsLoading ? (
                     <div className="tiq-spinner-wrap"><div className="tiq-spinner" /></div>
-                  ) : rows.length === 0 ? (
-                    <div className="tiq-empty" style={{ padding: 40 }}><div className="tiq-empty-title">No records</div></div>
                   ) : (
-                    <div style={{ overflowX: "auto" }}>
-                      <table className="tiq-table" style={{ minWidth: 800 }}>
-                        <thead>
-                          <tr>
-                            {cols.map((c: string) => <th key={c}>{c}</th>)}
-                            <th>Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {rows.map((row: any) => (
-                            <tr key={row.id} style={{ background: editRow?.id === row.id ? "rgba(251,191,36,.05)" : undefined }}>
-                              {cols.map((c: string) => (
-                                <td key={c} style={{ fontSize: 12, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                  {row[c] === null ? <span style={{ color: "var(--text-muted)" }}>null</span> :
-                                   typeof row[c] === "object" ? <span style={{ color: "var(--teal-500)", fontSize: 11 }}>[JSON]</span> :
-                                   String(row[c]).length > 60 ? String(row[c]).slice(0, 60) + "…" : String(row[c])}
-                                </td>
-                              ))}
-                              <td>
-                                <div style={{ display: "flex", gap: 4 }}>
-                                  <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
-                                    onClick={() => { setEditRow({...row}); setNewRow(false); }}>Edit</button>
-                                  <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ color: "var(--rose-500)" }}
-                                    onClick={() => { if (confirm(`Delete row ${row.id}?`)) deleteMut.mutate(row.id); }}>
-                                    <Trash2 size={12} />
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
+                    <DataTable
+                      columns={cols}
+                      rows={rows}
+                      getRowKey={(row) => row.id}
+                      rowStyle={(row) => editRow?.id === row.id ? { background: "rgba(251,191,36,.05)" } : undefined}
+                      actionsLabel="Actions"
+                      emptyMessage="No records"
+                      renderActions={(row) => (
+                        <div style={{ display: "flex", gap: 4 }}>
+                          <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
+                            onClick={() => { setEditRow({...row}); setNewRow(false); }}>Edit</button>
+                          <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ color: "var(--rose-500)" }}
+                            onClick={() => { if (confirm(`Delete row ${row.id}?`)) deleteMut.mutate(row.id); }}>
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      )}
+                    />
                   )}
 
                   {/* PAGINATION */}
@@ -274,24 +258,12 @@ export default function FileManagerPage() {
               <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>
                 {sqlResult.count} row(s) returned
               </div>
-              <div style={{ overflowX: "auto" }}>
-                <table className="tiq-table">
-                  <thead>
-                    <tr>{sqlResult.columns.map((c: string) => <th key={c}>{c}</th>)}</tr>
-                  </thead>
-                  <tbody>
-                    {sqlResult.rows.map((row: any, i: number) => (
-                      <tr key={i}>
-                        {sqlResult.columns.map((c: string) => (
-                          <td key={c} style={{ fontSize: 12, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            {row[c] === null ? <span style={{ color: "var(--text-muted)" }}>null</span> : String(row[c])}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <DataTable
+                columns={sqlResult.columns}
+                rows={sqlResult.rows}
+                getRowKey={(_row, i) => i}
+                emptyMessage="No rows returned"
+              />
             </div>
           )}
         </div>

@@ -42,6 +42,7 @@ export default function SettingsPage() {
   const [linkedin, setLinkedin] = useState({ email: "", password: "" });
   const [smtp, setSmtp] = useState({ host: "", port: "587", username: "", password: "", from_email: "" });
   const [ollama, setOllama] = useState({ base_url: "http://localhost:11434", model: "llama3" });
+  const [morphcast, setMorphcast] = useState({ license_key: "" });
   const [keyMsg, setKeyMsg] = useState("");
 
   const flashMsg = (m: string) => { setKeyMsg(m); setTimeout(() => setKeyMsg(""), 3000); };
@@ -215,6 +216,23 @@ export default function SettingsPage() {
             </div>
             <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("ollama", ollama)} disabled={savingService === "ollama"}>
               {savingService === "ollama" ? "Saving…" : "Save Ollama Settings"}
+            </button>
+          </div>
+
+          {/* MORPHCAST */}
+          <div className="tiq-card tiq-mb-6">
+            <div className="tiq-card-title">MorphCast — Video Interview Emotion AI</div>
+            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
+              Powers the facial emotion analysis during CandidateLens video interviews (Video Review column).
+              Get a free license key at{" "}
+              <a href="https://www.morphcast.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>morphcast.com</a>{" "}
+              — a key is required on every load; without one, interviews still run but skip emotion analysis.
+            </p>
+            <div className="tiq-grid-2">
+              {inp("License Key", morphcast.license_key, v => setMorphcast({ license_key: v }), "text", "paste your MorphCast license key")}
+            </div>
+            <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("morphcast", morphcast)} disabled={savingService === "morphcast"}>
+              {savingService === "morphcast" ? "Saving…" : "Save MorphCast Key"}
             </button>
           </div>
 

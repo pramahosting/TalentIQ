@@ -858,6 +858,26 @@ async def mark_contacted(
     return {"contacted": True}
 
 
+@router.get("/morphcast-key")
+async def get_morphcast_key(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns the recruiter's saved MorphCast license key (Settings > API
+    Keys, service: morphcast, key: license_key), used client-side by the
+    video interview modal for facial emotion analysis. Not a sensitive
+    secret in the traditional sense — MorphCast's SDK runs entirely in the
+    browser and the key is visible in that SDK's own network calls anyway."""
+    kr = await db.execute(
+        select(UserAPIKey).where(
+            UserAPIKey.user_id == current_user.id,
+            UserAPIKey.service == "morphcast",
+        )
+    )
+    key = next((k.key_value for k in kr.scalars().all() if k.key_name == "license_key"), None)
+    return {"license_key": key or ""}
+
+
 class InterviewResult(BaseModel):
     happy: int = 0
     neutral: int = 0
@@ -913,6 +933,31 @@ async def public_get_interview(token: str, db: AsyncSession = Depends(get_db)):
         "questions": c.interview_questions or [],
         "video_status": c.video_status,
     }
+
+
+@router.get("/public/interview/{token}/morphcast-key")
+async def public_get_morphcast_key(token: str, db: AsyncSession = Depends(get_db)):
+    """Same MorphCast license key as the authenticated endpoint above, but
+    resolved via the interview token (no login) — belongs to whichever
+    recruiter's account generated this candidate's interview."""
+    cr = await db.execute(
+        select(JobLensCandidate, JobLensSession)
+        .join(JobLensSession, JobLensCandidate.session_id == JobLensSession.id)
+        .where(JobLensCandidate.interview_token == token)
+    )
+    row = cr.first()
+    if not row:
+        raise HTTPException(404, "This interview link is invalid or has expired.")
+    _, session = row
+
+    kr = await db.execute(
+        select(UserAPIKey).where(
+            UserAPIKey.user_id == session.user_id,
+            UserAPIKey.service == "morphcast",
+        )
+    )
+    key = next((k.key_value for k in kr.scalars().all() if k.key_name == "license_key"), None)
+    return {"license_key": key or ""}
 
 
 @router.post("/public/interview/{token}/result")

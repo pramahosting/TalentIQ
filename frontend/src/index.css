@@ -125,7 +125,15 @@ body {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0; /* required for flex children to actually scroll instead of overflowing */
 }
+
+.tiq-nav::-webkit-scrollbar { width: 6px; }
+.tiq-nav::-webkit-scrollbar-track { background: transparent; }
+.tiq-nav::-webkit-scrollbar-thumb { background: rgba(255,255,255,.15); border-radius: 3px; }
+.tiq-nav::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.28); }
 
 .tiq-nav-section {
   font-size: 9px;
@@ -356,6 +364,32 @@ body {
   vertical-align: middle;
 }
 .tiq-table tr:hover td { background: #f8fafd; }
+
+/* ── COLUMN RESIZE HANDLE (DataTable) ── */
+.tiq-col-resize-handle {
+  position: absolute;
+  top: 0; right: 0; bottom: 0;
+  width: 12px;
+  margin-right: -6px;
+  cursor: col-resize;
+  z-index: 2;
+  display: flex;
+  justify-content: center;
+}
+.tiq-col-resize-handle::after {
+  content: "";
+  width: 2px;
+  align-self: stretch;
+  margin: 6px 0;
+  background: rgba(15, 23, 42, .18);
+  border-radius: 1px;
+  transition: background .15s, width .15s;
+}
+.tiq-col-resize-handle:hover::after,
+.tiq-col-resize-handle.tiq-resizing::after {
+  background: var(--teal-500);
+  width: 3px;
+}
 
 /* ── SCORE BAR ── */
 .tiq-score-bar {
