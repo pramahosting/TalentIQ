@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Users, Upload, FileText, Play, Download, ChevronDown, ChevronUp,
   CheckCircle, Clock, XCircle, Star, Video, RefreshCw, Sparkles, BarChart2,
-  Trash2 } from "lucide-react";
+  Trash2, Mail } from "lucide-react";
 import { api } from "../lib/api";
 
 // ─── API ───────────────────────────────────────────────────────────────────
@@ -23,6 +23,10 @@ const jobLensApi = {
     api.post(`/api/joblens/candidates/${cid}/interview-result`, result).then(r => r.data),
   export: (sid: number) =>
     api.get(`/api/joblens/sessions/${sid}/export`, { responseType: "blob" }).then(r => r.data),
+  prepareInvite: (cid: number) =>
+    api.post(`/api/joblens/candidates/${cid}/prepare-invite`).then(r => r.data),
+  markContacted: (cid: number) =>
+    api.post(`/api/joblens/candidates/${cid}/mark-contacted`).then(r => r.data),
 };
 
 // ─── HELPERS ───────────────────────────────────────────────────────────────
@@ -50,6 +54,43 @@ function ProgressBar({ value, color = "var(--teal-500)" }: { value: number; colo
   return (
     <div style={{ height: 6, background: "var(--bg-tertiary)", borderRadius: 3, overflow: "hidden", minWidth: 80 }}>
       <div style={{ height: "100%", width: `${Math.min(100, value)}%`, background: color, borderRadius: 3 }} />
+    </div>
+  );
+}
+
+// ─── ANCHORED POPOVER ───────────────────────────────────────────────────────
+// A small, borderless, no-backdrop popover that appears right next to
+// whatever triggered it (a "+N more" link, a resume-summary snippet, etc.)
+// and closes on outside click. No dimmed background, no centering.
+function AnchoredPopover({
+  x, y, onClose, width = 300, children
+}: { x: number; y: number; onClose: () => void; width?: number; children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    document.addEventListener("mousedown", handler);
+    const escHandler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", escHandler);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("keydown", escHandler);
+    };
+  }, [onClose]);
+
+  const clampedX = Math.max(8, Math.min(x, window.innerWidth - width - 12));
+
+  return (
+    <div ref={ref} style={{
+      position: "fixed", left: clampedX, top: y, zIndex: 1500, width,
+      maxHeight: 320, overflowY: "auto",
+      background: "#ffffff", color: "#111827",
+      border: "1px solid #e5e7eb", borderRadius: 10, padding: 12,
+      boxShadow: "0 8px 28px rgba(0,0,0,.16)",
+    }}>
+      {children}
     </div>
   );
 }
@@ -269,22 +310,16 @@ function VideoInterviewModal({
   };
 
   const currentQ = questions[qIdx] || "Loading...";
-  const emoCards: [string, string, number][] = [
-    ["😊", "Happy", avgAgg.happy], ["😐", "Neutral", avgAgg.neutral],
-    ["😢", "Sad", avgAgg.sad], ["😡", "Angry", avgAgg.angry],
-    ["😨", "Fear", avgAgg.fear], ["🤢", "Disgust", avgAgg.disgust],
-    ["😲", "Surprise", avgAgg.surprise],
-  ];
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.8)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ background: "var(--bg-primary)", borderRadius: 16, padding: 28, maxWidth: 760, width: "95%", maxHeight: "92vh", overflowY: "auto", boxShadow: "0 25px 60px rgba(0,0,0,.4)" }}>
+      <div style={{ background: "#ffffff", color: "#111827", borderRadius: 16, padding: 28, maxWidth: 760, width: "95%", maxHeight: "92vh", overflowY: "auto", boxShadow: "0 25px 60px rgba(0,0,0,.4)" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-          <div style={{ fontWeight: 800, fontSize: 17 }}>
+          <div style={{ fontWeight: 800, fontSize: 17, color: "#111827" }}>
             <Video size={16} style={{ display: "inline", marginRight: 8, color: "#ef4444" }} />
             Video Interview — {candidate.name}
           </div>
-          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", fontSize: 20 }}>×</button>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "#6b7280", fontSize: 20 }}>×</button>
         </div>
 
         <div style={{ position: "relative" }}>
@@ -301,36 +336,19 @@ function VideoInterviewModal({
           )}
         </div>
 
-        <div style={{ fontSize: 11, color: mcReady ? "var(--teal-500)" : "var(--text-muted)", marginTop: 8 }}>
+        <div style={{ fontSize: 11, color: mcReady ? "#0d9488" : "#6b7280", marginTop: 8 }}>
           {mcStatus}
         </div>
 
-        <div style={{ margin: "16px 0", padding: 14, background: "var(--bg-secondary)", borderRadius: 10, borderLeft: "4px solid var(--teal-500)" }}>
-          <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>Question {qIdx + 1} / {questions.length}</div>
-          <div style={{ fontSize: 15, fontWeight: 600 }}>{currentQ}</div>
+        <div style={{ margin: "16px 0", padding: 14, background: "#f3f4f6", borderRadius: 10, borderLeft: "4px solid #0d9488" }}>
+          <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>Question {qIdx + 1} / {questions.length}</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: "#111827" }}>{currentQ}</div>
         </div>
 
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, gap: 16 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8, flex: 1 }}>
-            {emoCards.map(([emoji, label, val]) => (
-              <div key={label} style={{ textAlign: "center", padding: "8px 0", background: "var(--bg-secondary)", borderRadius: 8 }}>
-                <div style={{ fontSize: 16 }}>{emoji}</div>
-                <div style={{ fontSize: 9, color: "var(--text-muted)" }}>{label}</div>
-                <div style={{ fontSize: 13, fontWeight: 700 }}>{val}%</div>
-              </div>
-            ))}
-          </div>
-          {recording && (
-            <div style={{ textAlign: "center", flexShrink: 0 }}>
-              <div style={{ fontSize: 28, fontWeight: 900, color: "#ef4444" }}>{timeLeft}s</div>
-              <div style={{ fontSize: 10, color: "var(--text-muted)" }}>remaining</div>
-            </div>
-          )}
-        </div>
-
-        {samples > 0 && (
-          <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 12 }}>
-            Dominant emotion so far: <strong style={{ color: "var(--teal-500)" }}>{dominant}</strong> ({samples} samples)
+        {recording && (
+          <div style={{ textAlign: "center", marginBottom: 16 }}>
+            <div style={{ fontSize: 28, fontWeight: 900, color: "#ef4444" }}>{timeLeft}s</div>
+            <div style={{ fontSize: 10, color: "#6b7280" }}>remaining</div>
           </div>
         )}
 
@@ -351,7 +369,91 @@ function VideoInterviewModal({
   );
 }
 
+// ─── CANDIDATE CONTACT / SEND INVITE MODAL ─────────────────────────────────
+// Produces a plain-text letter (not HTML) and hands off to the person's
+// default mail client (e.g. Outlook) via a mailto: link, so the actual
+// send happens from their own mailbox.
+function ContactModal({
+  candidate, token, onClose, onSent
+}: { candidate: any; token: string; onClose: () => void; onSent: () => void }) {
+  const link = `${window.location.origin}/interview/${token}`;
+  const [toEmail, setToEmail] = useState(candidate.email || "");
+  const [subject, setSubject] = useState(`Video Interview Invitation - ${candidate.name}`);
+  const [body, setBody] = useState(
+`Dear ${candidate.name},
+
+Thank you for your application. We would like to invite you to complete a short video interview as the next step in our recruitment process.
+
+Please click the link below to begin. It works directly in your browser — no account or login required:
+
+${link}
+
+Regards,
+HR Team`
+  );
+  const [opened, setOpened] = useState(false);
+
+  const handleSend = async () => {
+    const mailto = `mailto:${encodeURIComponent(toEmail)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    window.location.href = mailto;
+    setOpened(true);
+    try { await jobLensApi.markContacted(candidate.id); } catch { /* non-fatal */ }
+    onSent();
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ background: "#ffffff", color: "#111827", borderRadius: 14, padding: 24, maxWidth: 560, width: "94%", maxHeight: "90vh", overflowY: "auto", boxShadow: "0 25px 60px rgba(0,0,0,.4)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontWeight: 800, fontSize: 16 }}>
+            <Mail size={15} style={{ display: "inline", marginRight: 6, color: "#0d9488" }} />
+            Send Video Interview Invite — {candidate.name}
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 20, color: "#6b7280" }}>×</button>
+        </div>
+
+        {opened ? (
+          <div style={{ padding: "20px 0", textAlign: "center" }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: "#0d9488", marginBottom: 8 }}>
+              ✅ Draft opened in your email app
+            </div>
+            <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 12 }}>
+              Review it in Outlook (or your default mail app) and click Send there.
+            </div>
+            <button className="tiq-btn tiq-btn-outline" onClick={onClose}>Close</button>
+          </div>
+        ) : (
+          <>
+            <div className="tiq-form-group">
+              <label className="tiq-label" style={{ color: "#374151" }}>To</label>
+              <input className="tiq-input" value={toEmail} onChange={e => setToEmail(e.target.value)} />
+            </div>
+            <div className="tiq-form-group">
+              <label className="tiq-label" style={{ color: "#374151" }}>Subject</label>
+              <input className="tiq-input" value={subject} onChange={e => setSubject(e.target.value)} />
+            </div>
+            <div className="tiq-form-group">
+              <label className="tiq-label" style={{ color: "#374151" }}>Message</label>
+              <textarea className="tiq-input" style={{ minHeight: 220, fontFamily: "inherit", fontSize: 13, whiteSpace: "pre-wrap" }}
+                value={body} onChange={e => setBody(e.target.value)} />
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="tiq-btn tiq-btn-primary" onClick={handleSend} disabled={!toEmail}>
+                Send
+              </button>
+              <button className="tiq-btn tiq-btn-ghost" onClick={onClose}>Cancel</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── CANDIDATE ROW ─────────────────────────────────────────────────────────
+type PopoverKind = "resume" | "matched" | "missing";
+type PopoverState = { kind: PopoverKind; x: number; y: number } | null;
+
 function CandidateRow({
   c, rank, sessionId, lowT, highT, onRefresh
 }: { c: any; rank: number; sessionId: number; lowT: number; highT: number; onRefresh: () => void }) {
@@ -359,11 +461,23 @@ function CandidateRow({
   const [interviewOpen, setInterviewOpen] = useState(false);
   const [questions, setQuestions] = useState<string[]>(c.interview_questions || []);
   const [genLoading, setGenLoading] = useState(false);
-  const qc = useQueryClient();
+  const [contactOpen, setContactOpen] = useState(false);
+  const [contacted, setContacted] = useState(!!c.contacted);
+  const [inviteToken, setInviteToken] = useState<string | null>(c.interview_token || null);
+  const [preparingInvite, setPreparingInvite] = useState(false);
+  const [popover, setPopover] = useState<PopoverState>(null);
+
+  // Local, instantly-updated shortlist state — decoupled from the parent
+  // session refetch so the checkbox never waits on a network round trip.
+  const [shortlisted, setShortlisted] = useState(!!c.shortlisted);
+  useEffect(() => { setShortlisted(!!c.shortlisted); }, [c.shortlisted]);
+  useEffect(() => { setContacted(!!c.contacted); }, [c.contacted]);
 
   const shortlistMut = useMutation({
     mutationFn: () => jobLensApi.toggleShortlist(c.id),
-    onSuccess: () => onRefresh(),
+    onMutate: () => { setShortlisted(s => !s); },
+    onError: () => { setShortlisted(s => !s); },
+    onSuccess: () => { onRefresh(); },
   });
 
   const genQuestions = async () => {
@@ -382,9 +496,31 @@ function CandidateRow({
     onRefresh();
   };
 
+  const handleContactClick = async () => {
+    setPreparingInvite(true);
+    try {
+      let tok = inviteToken;
+      if (!tok) {
+        const r = await jobLensApi.prepareInvite(c.id);
+        tok = r.token;
+        setInviteToken(tok);
+      }
+      setContactOpen(true);
+    } finally {
+      setPreparingInvite(false);
+    }
+  };
+
+  const openPopover = (kind: PopoverKind) => (e: React.MouseEvent) => {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setPopover({ kind, x: rect.left, y: rect.bottom + 6 });
+  };
+
+  const resumeSummary: string[] = c.resume_summary || [];
+
   return (
     <>
-      <tr style={{ background: c.shortlisted ? "rgba(0,199,183,.05)" : undefined }}>
+      <tr style={{ background: shortlisted ? "rgba(0,199,183,.05)" : undefined }}>
         <td style={{ fontWeight: 700, color: "var(--text-muted)", fontSize: 12 }}>#{rank}</td>
         <td>
           <div style={{ fontWeight: 600 }}>{c.name}</div>
@@ -392,59 +528,66 @@ function CandidateRow({
         </td>
         <td style={{ fontSize: 12 }}>{c.email}</td>
         <td style={{ fontSize: 12 }}>{c.phone}</td>
-        <td style={{ fontSize: 12, fontWeight: 600, color: c.experience_years ? "var(--text-primary)" : "var(--text-muted)" }}>
-          {c.experience_years || "—"}
+
+        {/* Resume Summary — 2 bullets visible, click for the full 10-statement list */}
+        <td style={{ fontSize: 11, minWidth: 200 }}>
+          {resumeSummary.length > 0 ? (
+            <>
+              <ul style={{ margin: 0, paddingLeft: 14 }}>
+                {resumeSummary.slice(0, 2).map((s, i) => <li key={i} style={{ marginBottom: 2 }}>{s}</li>)}
+              </ul>
+              {resumeSummary.length > 2 && (
+                <button onClick={openPopover("resume")}
+                  style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", paddingLeft: 14, fontSize: 10, textDecoration: "underline" }}>
+                  +{resumeSummary.length - 2} more
+                </button>
+              )}
+            </>
+          ) : (
+            <span style={{ color: "var(--text-muted)" }}>
+              {c.experience_years || "No resume summary available"}
+            </span>
+          )}
         </td>
+
         <td>
           <div><ScoreCell score={c.ats_score} low={lowT} high={highT} /></div>
           <ProgressBar value={c.ats_score}
             color={c.ats_score >= highT ? "#10b981" : c.ats_score >= lowT ? "#f59e0b" : "#ef4444"} />
         </td>
-        {/* Key Strength = matched skills, bulleted, up to 5 */}
-        <td style={{ fontSize: 11, minWidth: 160, color: "var(--teal-500)" }}>
+
+        {/* Key Strength = matched skills, bulleted, up to 5, rest via popover */}
+        <td style={{ fontSize: 11, minWidth: 150, color: "var(--teal-500)" }}>
           <ul style={{ margin: 0, paddingLeft: 14 }}>
             {(c.matched_skills || []).slice(0, 5).map((s: string) => (
               <li key={s}>{s}</li>
             ))}
           </ul>
           {(c.matched_skills || []).length > 5 && (
-            <div style={{ color: "var(--text-muted)", paddingLeft: 14 }}>+{c.matched_skills.length - 5} more</div>
+            <button onClick={openPopover("matched")}
+              style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", paddingLeft: 14, fontSize: 10, textDecoration: "underline" }}>
+              +{c.matched_skills.length - 5} more
+            </button>
           )}
         </td>
-        {/* Considerations = missing skills, bulleted, up to 5 */}
-        <td style={{ fontSize: 11, minWidth: 160, color: "var(--rose-500)" }}>
+
+        {/* Considerations = missing skills, bulleted, up to 5, rest via popover */}
+        <td style={{ fontSize: 11, minWidth: 150, color: "var(--rose-500)" }}>
           <ul style={{ margin: 0, paddingLeft: 14 }}>
             {(c.missing_skills || []).slice(0, 5).map((s: string) => (
               <li key={s}>{s}</li>
             ))}
           </ul>
           {(c.missing_skills || []).length > 5 && (
-            <div style={{ color: "var(--text-muted)", paddingLeft: 14 }}>+{c.missing_skills.length - 5} more</div>
+            <button onClick={openPopover("missing")}
+              style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", paddingLeft: 14, fontSize: 10, textDecoration: "underline" }}>
+              +{c.missing_skills.length - 5} more
+            </button>
           )}
         </td>
+
         <td><StatusBadge status={c.status} /></td>
-        <td><StatusBadge status={c.video_status} /></td>
-        <td>
-          <button className="tiq-btn tiq-btn-primary tiq-btn-sm"
-            onClick={() => { if (!questions.length) genQuestions(); setInterviewOpen(true); }}>
-            <Video size={12} /> {c.video_status === "Completed" ? "Re-run" : "Start"}
-          </button>
-        </td>
-        <td style={{ fontSize: 12, fontWeight: 600 }}>{c.emotion_happy ?? 0}%</td>
-        <td style={{ fontSize: 12, fontWeight: 600 }}>{c.emotion_neutral ?? 0}%</td>
-        <td style={{ fontSize: 12, fontWeight: 600 }}>{c.emotion_sad ?? 0}%</td>
-        <td style={{ fontSize: 12, fontWeight: 600 }}>{c.emotion_angry ?? 0}%</td>
-        <td style={{ fontSize: 12, fontWeight: 600, color: "var(--violet-500)" }}>{c.dominant_emotion || "—"}</td>
-        <td>
-          <button
-            className="tiq-btn tiq-btn-ghost tiq-btn-sm"
-            style={{ color: c.shortlisted ? "#f59e0b" : "var(--text-muted)" }}
-            onClick={() => shortlistMut.mutate()}
-          >
-            <Star size={14} fill={c.shortlisted ? "#f59e0b" : "none"} />
-            {c.shortlisted ? " Yes" : " No"}
-          </button>
-        </td>
+
         <td>
           <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
             onClick={() => setExpanded(e => !e)}>
@@ -455,47 +598,79 @@ function CandidateRow({
 
       {expanded && (
         <tr>
-          <td colSpan={18} style={{ padding: "14px 20px", background: "var(--bg-secondary)" }}>
+          <td colSpan={10} style={{ padding: "14px 20px", background: "var(--bg-secondary)" }}>
             {c.summary && (
               <div style={{ marginBottom: 16, paddingBottom: 14, borderBottom: "1px solid var(--border)" }}>
                 <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 6 }}>Profile Summary</div>
                 <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.6 }}>{c.summary}</div>
               </div>
             )}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 16 }}>
+              {/* Video Interview */}
               <div>
-                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 6 }}>Matched Skills</div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                  {(c.matched_skills || []).map((s: string) => (
-                    <span key={s} className="tiq-badge tiq-badge-teal" style={{ fontSize: 10 }}>{s}</span>
-                  ))}
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 6 }}>Video Interview</div>
+                <button className="tiq-btn tiq-btn-primary tiq-btn-sm"
+                  onClick={() => { if (!questions.length) genQuestions(); setInterviewOpen(true); }}>
+                  <Video size={12} /> {c.video_status === "Completed" ? "Re-run" : "Start"}
+                </button>
+                <div style={{ marginTop: 6 }}><StatusBadge status={c.video_status} /></div>
+              </div>
+
+              {/* Video Review */}
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 6 }}>Video Review</div>
+                <div style={{ fontSize: 11, lineHeight: 1.7 }}>
+                  <div>😊 Happy: <strong>{c.emotion_happy ?? 0}%</strong></div>
+                  <div>😐 Neutral: <strong>{c.emotion_neutral ?? 0}%</strong></div>
+                  <div>😢 Sad: <strong>{c.emotion_sad ?? 0}%</strong></div>
+                  <div>😡 Angry: <strong>{c.emotion_angry ?? 0}%</strong></div>
+                  <div style={{ color: "var(--violet-500)" }}>Dominant: <strong>{c.dominant_emotion || "—"}</strong></div>
                 </div>
               </div>
+
+              {/* Candidate Contact — checked once the invite has actually been sent */}
               <div>
-                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 6 }}>Missing Skills</div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                  {(c.missing_skills || []).map((s: string) => (
-                    <span key={s} className="tiq-badge tiq-badge-rose" style={{ fontSize: 10 }}>{s}</span>
-                  ))}
-                </div>
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 6 }}>Candidate Contact</div>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12 }}>
+                  <input
+                    type="checkbox"
+                    checked={contacted}
+                    disabled={preparingInvite}
+                    onClick={e => e.preventDefault()}
+                    onChange={handleContactClick}
+                  />
+                  {preparingInvite ? "Preparing…" : contacted ? "Invite sent" : "Send interview invite"}
+                </label>
               </div>
+
+              {/* Shortlist */}
               <div>
-                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 6 }}>
-                  Interview Questions
-                  <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ marginLeft: 8, fontSize: 10 }}
-                    onClick={genQuestions} disabled={genLoading}>
-                    <Sparkles size={10} /> {genLoading ? "Generating…" : "Generate"}
-                  </button>
-                </div>
-                {questions.length > 0 ? (
-                  <ol style={{ paddingLeft: 16, margin: 0, fontSize: 12 }}>
-                    {questions.map((q, i) => <li key={i} style={{ marginBottom: 4 }}>{q}</li>)}
-                  </ol>
-                ) : (
-                  <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Click Generate to create questions</div>
-                )}
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 6 }}>Shortlist</div>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12 }}>
+                  <input type="checkbox" checked={shortlisted} onChange={() => shortlistMut.mutate()} />
+                  Shortlisted
+                </label>
               </div>
             </div>
+
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 6 }}>
+                Interview Questions
+                <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ marginLeft: 8, fontSize: 10 }}
+                  onClick={genQuestions} disabled={genLoading}>
+                  <Sparkles size={10} /> {genLoading ? "Generating…" : "Generate"}
+                </button>
+              </div>
+              {questions.length > 0 ? (
+                <ol style={{ paddingLeft: 16, margin: 0, fontSize: 12 }}>
+                  {questions.map((q, i) => <li key={i} style={{ marginBottom: 4 }}>{q}</li>)}
+                </ol>
+              ) : (
+                <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Click Generate to create questions</div>
+              )}
+            </div>
+
             {c.bonus > 0 && (
               <div style={{ marginTop: 10, fontSize: 12, color: "#f59e0b" }}>
                 🎯 Bonus: +{c.bonus} pts — {c.bonus_reasons}
@@ -513,6 +688,46 @@ function CandidateRow({
           onClose={() => setInterviewOpen(false)}
           onDone={handleInterviewDone}
         />
+      )}
+
+      {contactOpen && inviteToken && (
+        <ContactModal
+          candidate={c}
+          token={inviteToken}
+          onClose={() => setContactOpen(false)}
+          onSent={() => setContacted(true)}
+        />
+      )}
+
+      {popover?.kind === "resume" && (
+        <AnchoredPopover x={popover.x} y={popover.y} width={320} onClose={() => setPopover(null)}>
+          <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 8 }}>Full Resume Summary</div>
+          <ol style={{ margin: 0, paddingLeft: 16, fontSize: 11, lineHeight: 1.6 }}>
+            {resumeSummary.map((s, i) => <li key={i} style={{ marginBottom: 4 }}>{s}</li>)}
+          </ol>
+        </AnchoredPopover>
+      )}
+
+      {popover?.kind === "matched" && (
+        <AnchoredPopover x={popover.x} y={popover.y} width={280} onClose={() => setPopover(null)}>
+          <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 8 }}>All Key Strengths</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {(c.matched_skills || []).map((s: string) => (
+              <span key={s} style={{ background: "#0d9488", color: "#fff", fontSize: 10, padding: "3px 8px", borderRadius: 999 }}>{s}</span>
+            ))}
+          </div>
+        </AnchoredPopover>
+      )}
+
+      {popover?.kind === "missing" && (
+        <AnchoredPopover x={popover.x} y={popover.y} width={280} onClose={() => setPopover(null)}>
+          <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 8 }}>All Considerations</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {(c.missing_skills || []).map((s: string) => (
+              <span key={s} style={{ background: "#e11d48", color: "#fff", fontSize: 10, padding: "3px 8px", borderRadius: 999 }}>{s}</span>
+            ))}
+          </div>
+        </AnchoredPopover>
       )}
     </>
   );
@@ -592,14 +807,38 @@ export default function JobLensPage() {
         <p className="tiq-page-sub">AI recruitment engine — rank CVs, score candidates, run video interviews</p>
       </div>
 
-      <div className="tiq-tabs">
-        <button className={`tiq-tab${tab === "new" ? " active" : ""}`} onClick={() => setTab("new")}>
-          <Play size={12} style={{ display: "inline", marginRight: 6 }} /> New Analysis
-        </button>
-        <button className={`tiq-tab${tab === "history" ? " active" : ""}`} onClick={() => setTab("history")}>
-          <BarChart2 size={12} style={{ display: "inline", marginRight: 6 }} /> Results
-          {sessions.length > 0 && <span className="tiq-badge tiq-badge-slate" style={{ marginLeft: 8, fontSize: 10 }}>{sessions.length}</span>}
-        </button>
+      {/* Tabs row — session dropdown sits inline, right next to the Results tab */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+        <div className="tiq-tabs">
+          <button className={`tiq-tab${tab === "new" ? " active" : ""}`} onClick={() => setTab("new")}>
+            <Play size={12} style={{ display: "inline", marginRight: 6 }} /> New Analysis
+          </button>
+          <button className={`tiq-tab${tab === "history" ? " active" : ""}`} onClick={() => setTab("history")}>
+            <BarChart2 size={12} style={{ display: "inline", marginRight: 6 }} /> Results
+            {sessions.length > 0 && <span className="tiq-badge tiq-badge-slate" style={{ marginLeft: 8, fontSize: 10 }}>{sessions.length}</span>}
+          </button>
+        </div>
+
+        {tab === "history" && sessions.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <select className="tiq-input" style={{ maxWidth: 320 }}
+              value={activeSessionId ?? ""}
+              onChange={e => setActiveSessionId(e.target.value ? Number(e.target.value) : null)}>
+              <option value="">Select a session…</option>
+              {sessions.map((s: any) => (
+                <option key={s.id} value={s.id}>
+                  Session #{s.id} · {s.cv_count} CVs · {new Date(s.created_at).toLocaleDateString()}
+                </option>
+              ))}
+            </select>
+            {activeSessionId && (
+              <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ color: "var(--rose-500)" }}
+                onClick={() => { if (confirm("Delete this session?")) deleteMutation.mutate(activeSessionId); }}>
+                <Trash2 size={12} />
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {tab === "new" && (
@@ -700,41 +939,7 @@ export default function JobLensPage() {
       )}
 
       {tab === "history" && (
-        <div style={{ display: "grid", gridTemplateColumns: "240px 1fr", gap: 20, alignItems: "flex-start" }}>
-          {/* Session list */}
-          <div className="tiq-card" style={{ padding: 0 }}>
-            <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border)", fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", letterSpacing: ".5px" }}>
-              Sessions ({sessions.length})
-            </div>
-            {sessions.length === 0 ? (
-              <div style={{ padding: 16, fontSize: 13, color: "var(--text-muted)" }}>No sessions yet.</div>
-            ) : sessions.map((s: any) => (
-              <div key={s.id}
-                onClick={() => setActiveSessionId(s.id)}
-                style={{
-                  padding: "10px 16px", cursor: "pointer",
-                  background: activeSessionId === s.id ? "rgba(139,92,246,.07)" : undefined,
-                  borderLeft: activeSessionId === s.id ? "3px solid var(--violet-500)" : "3px solid transparent",
-                }}>
-                <div style={{ fontSize: 12, fontWeight: 600 }}>Session #{s.id}</div>
-                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2, display: "flex", gap: 8, alignItems: "center" }}>
-                  <span>{s.cv_count} CVs</span>
-                  <span>·</span>
-                  <span>{new Date(s.created_at).toLocaleDateString()}</span>
-                  <button
-                    onClick={e => { e.stopPropagation(); if (confirm("Delete this session?")) deleteMutation.mutate(s.id); }}
-                    style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", display: "flex", padding: 2 }}>
-                    <Trash2 size={11} />
-                  </button>
-                </div>
-                <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {s.jd_preview}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {/* Results */}
+        <div>
           {activeSession ? (
             <div>
               {/* Summary */}
@@ -811,7 +1016,7 @@ export default function JobLensPage() {
                 </div>
               )}
 
-              {/* Table */}
+              {/* Table — full pane width */}
               <div className="tiq-card" style={{ padding: 0 }}>
                 <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <div style={{ fontWeight: 700, fontSize: 14 }}>
@@ -831,26 +1036,18 @@ export default function JobLensPage() {
                   </div>
                 </div>
                 <div style={{ overflowX: "auto" }}>
-                  <table className="tiq-table" style={{ minWidth: 1700 }}>
+                  <table className="tiq-table" style={{ minWidth: 1100, width: "100%" }}>
                     <thead>
                       <tr>
                         <th>#</th>
                         <th>Candidate</th>
                         <th>Email</th>
                         <th>Phone</th>
-                        <th>Experience</th>
+                        <th>Resume Summary</th>
                         <th>ATS Score</th>
                         <th>Key Strength</th>
                         <th>Considerations</th>
                         <th>Status</th>
-                        <th>Video Status</th>
-                        <th>Video Interview</th>
-                        <th>Happy %</th>
-                        <th>Neutral %</th>
-                        <th>Sad %</th>
-                        <th>Angry %</th>
-                        <th>Dominant Emotion</th>
-                        <th>Shortlist</th>
                         <th>Actions</th>
                       </tr>
                     </thead>
@@ -876,7 +1073,11 @@ export default function JobLensPage() {
               <div className="tiq-empty">
                 <Users size={44} color="var(--violet-500)" style={{ opacity: .4 }} />
                 <div className="tiq-empty-title">Select a Session</div>
-                <div style={{ fontSize: 13 }}>Choose a past session from the left, or run a new analysis.</div>
+                <div style={{ fontSize: 13 }}>
+                  {sessions.length > 0
+                    ? "Choose a session from the dropdown above, or run a new analysis."
+                    : "No sessions yet — run a new analysis to get started."}
+                </div>
               </div>
             </div>
           )}

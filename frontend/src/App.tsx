@@ -10,6 +10,7 @@ import JobIntelPage   from "./pages/JobIntelPage";
 import LinkLensPage   from "./pages/LinkLensPage";
 import CVIntelPage    from "./pages/CVIntelPage";
 import JobLensPage    from "./pages/JobLensPage";
+import PublicInterviewPage from "./pages/PublicInterviewPage";
 import SettingsPage   from "./pages/SettingsPage";
 import AdminSetupPage from "./pages/AdminSetupPage";
 import FileManagerPage from "./pages/FileManagerPage";
@@ -42,6 +43,7 @@ export default function App() {
             <Route path="/" element={<LandingPage />} />
             <Route path="/login" element={<LoginPage />} />
             <Route path="/register" element={<RegisterPage />} />
+            <Route path="/interview/:token" element={<PublicInterviewPage />} />
             <Route path="/app" element={<PrivateRoute><AppLayout /></PrivateRoute>}>
               <Route index element={<DashboardPage />} />
               <Route path="jobhunt"    element={<JobHuntPage />} />

@@ -40,6 +40,7 @@ export default function SettingsPage() {
   const [adzuna, setAdzuna] = useState({ app_id: "", app_key: "" });
   const [groq, setGroq] = useState({ api_key: "" });
   const [linkedin, setLinkedin] = useState({ email: "", password: "" });
+  const [smtp, setSmtp] = useState({ host: "", port: "587", username: "", password: "", from_email: "" });
   const [keyMsg, setKeyMsg] = useState("");
 
   const flashMsg = (m: string) => { setKeyMsg(m); setTimeout(() => setKeyMsg(""), 3000); };
@@ -196,6 +197,25 @@ export default function SettingsPage() {
             </div>
             <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("linkedin", linkedin)} disabled={savingService === "linkedin"}>
               {savingService === "linkedin" ? "Saving…" : "Save LinkedIn Credentials"}
+            </button>
+          </div>
+
+          {/* SMTP */}
+          <div className="tiq-card tiq-mb-6">
+            <div className="tiq-card-title">SMTP — Candidate Email Invites</div>
+            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
+              Used by CandidateLens to send video-interview invite emails to candidates.
+              For Gmail, use an <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>app password</a>, not your regular password.
+            </p>
+            <div className="tiq-grid-2">
+              {inp("SMTP Host", smtp.host, v => setSmtp(s => ({ ...s, host: v })), "text", "e.g. smtp.gmail.com")}
+              {inp("SMTP Port", smtp.port, v => setSmtp(s => ({ ...s, port: v })), "text", "587")}
+              {inp("Username", smtp.username, v => setSmtp(s => ({ ...s, username: v })), "text", "you@company.com")}
+              {inp("Password", smtp.password, v => setSmtp(s => ({ ...s, password: v })), "password", "••••••••")}
+              {inp("From Email", smtp.from_email, v => setSmtp(s => ({ ...s, from_email: v })), "email", "recruiting@company.com")}
+            </div>
+            <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("smtp", smtp)} disabled={savingService === "smtp"}>
+              {savingService === "smtp" ? "Saving…" : "Save SMTP Settings"}
             </button>
           </div>
 
