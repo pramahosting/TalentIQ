@@ -20,24 +20,21 @@ from schemas.schemas import (
     MatchRequest, JobMatchOut, JobOut,
 )
 from utils.auth_utils import get_current_user
+from utils.credentials import get_credential
+from utils.sequencing import next_sequence_number
 from agents.jobhunt_agent import (
     scrape_jobs_adzuna, parse_resume_text,
-    calculate_match, generate_cover_letter,
+    calculate_match, generate_cover_letter, extract_candidate_profile,
 )
 
 router = APIRouter()
 
 
 async def _get_user_api_key(user_id: int, service: str, key_name: str, db: AsyncSession) -> str | None:
-    result = await db.execute(
-        select(UserAPIKey.key_value).where(
-            UserAPIKey.user_id == user_id,
-            UserAPIKey.service == service,
-            UserAPIKey.key_name == key_name,
-        )
-    )
-    row = result.scalar_one_or_none()
-    return row
+    # Delegates to the centralized, policy-enforcing lookup — Adzuna and
+    # Groq (used below) are allowed to fall back to an admin-configured
+    # global key; every other service never would.
+    return await get_credential(db, user_id, service, key_name)
 
 
 async def _extract_text_from_file(file: UploadFile) -> str:
@@ -142,8 +139,13 @@ async def search_jobs(
     current_user: User = Depends(get_current_user),
 ):
     # Get user's Adzuna keys (fallback to env defaults)
-    adzuna_id = await _get_user_api_key(current_user.id, "adzuna", "app_id", db) or "638c0962"
-    adzuna_key = await _get_user_api_key(current_user.id, "adzuna", "app_key", db) or "04681adc21daeda69c41b271627d448a"
+    # No hardcoded fallback credentials — Adzuna is a shareable service, so
+    # if the current user hasn't saved their own key, this transparently
+    # falls back to whatever an admin has configured as the platform-wide
+    # global key (see utils/credentials.py). If neither exists, the search
+    # below will simply return Adzuna's own auth-failure error.
+    adzuna_id = await _get_user_api_key(current_user.id, "adzuna", "app_id", db)
+    adzuna_key = await _get_user_api_key(current_user.id, "adzuna", "app_key", db)
 
     # Detect country code for Adzuna from location text
     location_lower = (payload.location or "").lower()
@@ -212,8 +214,10 @@ async def search_jobs(
                 break
 
     # Persist search
+    seq_num = await next_sequence_number(db, JobSearch, current_user.id)
     search = JobSearch(
         user_id=current_user.id,
+        sequence_number=seq_num,
         role=payload.role,
         location=payload.location,
         industry=payload.industry,
@@ -253,6 +257,7 @@ async def search_jobs(
 
     return JobSearchOut(
         id=search.id,
+        sequence_number=search.sequence_number or search.id,
         role=search.role,
         location=search.location,
         results_count=search.results_count,
@@ -280,7 +285,7 @@ async def list_searches(
         jobs_result = await db.execute(select(Job).where(Job.search_id == s.id))
         jobs = [JobOut.model_validate(j) for j in jobs_result.scalars().all()]
         out.append(JobSearchOut(
-            id=s.id, role=s.role, location=s.location,
+            id=s.id, sequence_number=s.sequence_number or s.id, role=s.role, location=s.location,
             results_count=s.results_count, searched_at=s.searched_at, jobs=jobs
         ))
     return out
@@ -310,6 +315,10 @@ async def match_resume(
 
     groq_key = await _get_user_api_key(current_user.id, "groq", "api_key", db)
 
+    # Extract the candidate's profile ONCE for this batch — reused across
+    # every job below instead of re-extracting the same resume repeatedly.
+    candidate_profile = await extract_candidate_profile(resume.raw_text or "", groq_key)
+
     match_objs = []
     for job in jobs:
         job_dict = {
@@ -318,7 +327,7 @@ async def match_resume(
             "description": job.description or "",
             "apply_link": job.apply_link,
         }
-        match_data = calculate_match(resume.raw_text or "", job_dict, groq_key)
+        match_data = await calculate_match(resume.raw_text or "", job_dict, groq_key, candidate_profile)
         cover = generate_cover_letter(
             resume.raw_text or "", resume.parsed_data or {}, job_dict, groq_key
         )

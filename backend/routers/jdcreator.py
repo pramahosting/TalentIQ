@@ -24,6 +24,8 @@ from pydantic import BaseModel
 from db.database import get_db
 from models.models import User, UserAPIKey, JDDocument
 from utils.auth_utils import get_current_user
+from utils.credentials import get_credential, get_all_credentials
+from utils.sequencing import next_sequence_number
 
 router = APIRouter()
 
@@ -200,6 +202,7 @@ async def _generate_jd_content(
 def _fmt(d: JDDocument) -> dict:
     return {
         "id": d.id,
+        "sequence_number": d.sequence_number or d.id,
         "role_title": d.role_title,
         "company_name": d.company_name,
         "job_type": d.job_type,
@@ -375,21 +378,9 @@ async def generate_jd(
     if not payload.role_title.strip():
         raise HTTPException(400, "Role title is required.")
 
-    kr = await db.execute(
-        select(UserAPIKey).where(
-            UserAPIKey.user_id == current_user.id,
-            UserAPIKey.service == "groq",
-        )
-    )
-    groq_key = next((k.key_value for k in kr.scalars().all() if k.key_name == "api_key"), None)
+    groq_key = await get_credential(db, current_user.id, "groq", "api_key")
 
-    orow = await db.execute(
-        select(UserAPIKey).where(
-            UserAPIKey.user_id == current_user.id,
-            UserAPIKey.service == "ollama",
-        )
-    )
-    ollama_keys = {k.key_name: k.key_value for k in orow.scalars().all()}
+    ollama_keys = await get_all_credentials(db, current_user.id, "ollama")
     ollama_base_url = ollama_keys.get("base_url")
     ollama_model = ollama_keys.get("model")
 
@@ -398,8 +389,10 @@ async def generate_jd(
         payload.experience_required, payload.education_required, groq_key, ollama_base_url, ollama_model,
     )
 
+    seq_num = await next_sequence_number(db, JDDocument, current_user.id)
     doc = JDDocument(
         user_id=current_user.id,
+        sequence_number=seq_num,
         role_title=payload.role_title.strip(),
         company_name=current_user.company or "",
         job_type=payload.job_type or "Full time",

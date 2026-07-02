@@ -199,7 +199,7 @@ export default function JDCreatorPage() {
               onChange={id => setSelectedId(id as number | null)}
               options={documents.map((d: any) => ({
                 id: d.id,
-                label: `${d.role_title} · ${d.company_name || "—"} · ${new Date(d.created_at).toLocaleDateString()}`,
+                label: `#${d.sequence_number || d.id} · ${d.role_title} · ${d.company_name || "—"} · ${new Date(d.created_at).toLocaleDateString()}`,
               }))}
               onDelete={id => deleteMut.mutate(id as number)}
               placeholder="Select a JD…"

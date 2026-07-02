@@ -18,6 +18,8 @@ from pydantic import BaseModel
 from db.database import get_db, AsyncSessionLocal
 from models.models import User, UserAPIKey, LinkLensSearch, LinkedInProfile
 from utils.auth_utils import get_current_user
+from utils.credentials import get_all_credentials
+from utils.sequencing import next_sequence_number
 
 router = APIRouter()
 
@@ -41,14 +43,10 @@ async def start_search(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # Get LinkedIn credentials
-    keys_result = await db.execute(
-        select(UserAPIKey).where(
-            UserAPIKey.user_id == current_user.id,
-            UserAPIKey.service == "linkedin",
-        )
-    )
-    key_map = {k.key_name: k.key_value for k in keys_result.scalars().all()}
+    # Get LinkedIn credentials — strictly private, never shared or
+    # falls back to another user's/admin's key (LinkedIn is not in
+    # utils.credentials.SHAREABLE_SERVICES).
+    key_map = await get_all_credentials(db, current_user.id, "linkedin")
     li_email    = key_map.get("email", "")
     li_password = key_map.get("password", "")
 
@@ -70,8 +68,10 @@ async def start_search(
 
     # Create DB record
     try:
+        seq_num = await next_sequence_number(db, LinkLensSearch, current_user.id)
         search = LinkLensSearch(
             user_id=current_user.id,
+            sequence_number=seq_num,
             job_title=req.job_title,
             country=req.country,
             city=req.city,
@@ -277,7 +277,7 @@ async def list_searches(
     )
     return [
         {
-            "id": s.id, "job_title": s.job_title, "country": s.country,
+            "id": s.id, "sequence_number": s.sequence_number or s.id, "job_title": s.job_title, "country": s.country,
             "city": s.city, "skills": s.skills, "max_results": s.max_results,
             "status": s.status, "profiles_found": s.profiles_found,
             "created_at": s.created_at.isoformat() if s.created_at else None,
@@ -309,7 +309,7 @@ async def get_search(
     profiles = pr.scalars().all()
 
     return {
-        "id": search.id, "job_title": search.job_title,
+        "id": search.id, "sequence_number": search.sequence_number or search.id, "job_title": search.job_title,
         "country": search.country, "city": search.city,
         "skills": search.skills, "status": search.status,
         "profiles_found": search.profiles_found,

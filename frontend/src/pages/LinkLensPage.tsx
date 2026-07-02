@@ -231,7 +231,7 @@ export default function LinkLensPage() {
                   onChange={id => { setActiveSearchId(id as number | null); setStatusLog([]); }}
                   options={searches.map((s: any) => ({
                     id: s.id,
-                    label: `${s.job_title} · ${s.city}, ${s.country} · ${s.profiles_found} profiles · ${s.status}`,
+                    label: `#${s.sequence_number || s.id} · ${s.job_title} · ${s.city}, ${s.country} · ${s.profiles_found} profiles · ${s.status}`,
                   }))}
                   onDelete={id => deleteMut.mutate(id as number)}
                   placeholder="Select a past search…"

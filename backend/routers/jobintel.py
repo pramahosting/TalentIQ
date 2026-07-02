@@ -16,6 +16,7 @@ from db.database import get_db, AsyncSessionLocal
 from models.models import User, JobIntelRun, JobIntelRecord
 from schemas.schemas import JobIntelRequest, JobIntelRunOut, JobIntelRecordOut
 from utils.auth_utils import get_current_user
+from utils.sequencing import next_sequence_number
 
 router = APIRouter()
 
@@ -114,8 +115,10 @@ async def run_analysis(
     current_user: User = Depends(get_current_user),
 ):
     """Start a new MarketIntel simulation run for the current user."""
+    seq_num = await next_sequence_number(db, JobIntelRun, current_user.id)
     run = JobIntelRun(
         user_id=current_user.id,
+        sequence_number=seq_num,
         role=payload.role,
         location=payload.location,
         industry=payload.industry,
@@ -128,7 +131,7 @@ async def run_analysis(
 
     background_tasks.add_task(_run_simulation, run.id, payload, current_user.id)
 
-    return {"id": run.id, "status": run.status, "created_at": run.created_at.isoformat()}
+    return {"id": run.id, "sequence_number": run.sequence_number or run.id, "status": run.status, "created_at": run.created_at.isoformat()}
 
 
 @router.get("/runs")
@@ -147,6 +150,7 @@ async def list_runs(
     return [
         {
             "id": r.id,
+            "sequence_number": r.sequence_number or r.id,
             "role": r.role,
             "location": r.location,
             "industry": r.industry,
@@ -178,6 +182,7 @@ async def get_run(
 
     return {
         "id": run.id,
+        "sequence_number": run.sequence_number or run.id,
         "role": run.role,
         "location": run.location,
         "industry": run.industry,

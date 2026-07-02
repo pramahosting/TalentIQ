@@ -6,7 +6,7 @@ All tables prefixed tiq_ to coexist with AccFino on the same Neon database.
 from datetime import datetime
 from sqlalchemy import (
     Column, Integer, String, Text, Float, Boolean,
-    DateTime, ForeignKey, JSON,
+    DateTime, ForeignKey, JSON, LargeBinary,
 )
 from sqlalchemy.orm import relationship
 
@@ -46,6 +46,10 @@ class User(Base):
     joblens_sessions  = relationship("JobLensSession",  back_populates="user", cascade="all, delete-orphan")
     jd_documents      = relationship("JDDocument",      back_populates="user", cascade="all, delete-orphan")
     cvanalysis_records = relationship("CVAnalysisRecord", back_populates="user", cascade="all, delete-orphan")
+    jd_records         = relationship("JDRecord",         back_populates="user", cascade="all, delete-orphan")
+    vendors            = relationship("Vendor",           back_populates="user", cascade="all, delete-orphan")
+    tracked_candidates = relationship("TrackedCandidate",  back_populates="user", cascade="all, delete-orphan")
+    clients            = relationship("Client",            back_populates="user", cascade="all, delete-orphan")
 
 
 class UserAPIKey(Base):
@@ -56,6 +60,11 @@ class UserAPIKey(Base):
     service    = Column(String(100), nullable=False)
     key_name   = Column(String(100), nullable=False)
     key_value  = Column(Text, nullable=False)
+    is_global  = Column(Boolean, default=False, nullable=False)
+    # is_global=True means this credential is a platform-wide fallback,
+    # usable by every user — ONLY permitted for services in
+    # utils.credentials.SHAREABLE_SERVICES (groq/ollama/adzuna), and only
+    # settable by an admin. Enforced in routers/auth.py, not just here.
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="api_keys")
@@ -87,6 +96,7 @@ class JobSearch(Base):
     __tablename__ = "tiq_job_searches"
 
     id            = Column(Integer, primary_key=True, index=True)
+    sequence_number = Column(Integer)  # per-user sequential display number (1, 2, 3...)
     user_id       = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
     role          = Column(String(200))
     location      = Column(String(200))
@@ -151,6 +161,7 @@ class JobIntelRun(Base):
     __tablename__ = "tiq_jobintel_runs"
 
     id                   = Column(Integer, primary_key=True, index=True)
+    sequence_number = Column(Integer)  # per-user sequential display number (1, 2, 3...)
     user_id              = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
     role                 = Column(String(200))
     location             = Column(String(200))
@@ -210,6 +221,7 @@ class LinkLensSearch(Base):
     __tablename__ = "tiq_linklens_searches"
 
     id             = Column(Integer, primary_key=True, index=True)
+    sequence_number = Column(Integer)  # per-user sequential display number (1, 2, 3...)
     user_id        = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
     job_title      = Column(String(300))
     country        = Column(String(200))
@@ -276,9 +288,18 @@ class JobLensSession(Base):
     __tablename__ = "tiq_joblens_sessions"
 
     id             = Column(Integer, primary_key=True, index=True)
+    sequence_number = Column(Integer)  # per-user sequential display number (1, 2, 3...)
     user_id        = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
     jd_text        = Column(Text)
     jd_skills      = Column(JSON, default=list)
+    jd_role        = Column(String(300))     # extracted by LLM/heuristic — not guessed client-side
+    jd_location    = Column(String(300))
+    jd_company     = Column(String(300))
+    jd_record_id   = Column(Integer, ForeignKey("tiq_jd_records.id"), nullable=True)  # optional link to JD Management
+    jd_client_name = Column(String(300))     # denormalized client name, for display without extra joins
+    jd_essential_skills   = Column(JSON, default=list)
+    jd_good_to_have_skills = Column(JSON, default=list)
+    jd_optional_skills    = Column(JSON, default=list)
     low_threshold  = Column(Integer, default=40)
     high_threshold = Column(Integer, default=70)
     cv_count       = Column(Integer, default=0)
@@ -321,6 +342,28 @@ class JobLensCandidate(Base):
     dominant_emotion    = Column(String(20), default="Neutral")
     shortlisted         = Column(Boolean, default=False)
 
+    # ── Resume + interview video stored directly on this row ──────────────
+    # Kept as blobs (not files on disk) so the candidate's full record —
+    # score, resume, and interview footage — lives in one place and is
+    # covered by the same row-level access control as everything else.
+    # If this candidate was sourced from Vendor Management (rather than a
+    # raw manual CV upload), these point back to that origin.
+    source_vendor_id   = Column(Integer, ForeignKey("tiq_vendors.id"), nullable=True)
+    source_vendor_name = Column(String(300))  # denormalized, for display without extra joins
+    source_tracked_candidate_id = Column(Integer, ForeignKey("tiq_tracked_candidates.id"), nullable=True)
+
+    resume_file_blob     = Column(LargeBinary)
+    resume_file_mimetype = Column(String(100))
+    video_blob            = Column(LargeBinary)
+    video_mimetype         = Column(String(50), default="video/webm")
+
+    # ── Automatic post-interview video analysis (runs once the video blob
+    # above is stored) — transcript + LLM-scored performance, on the same
+    # row as everything else for this candidate.
+    video_transcript      = Column(Text)
+    video_analysis        = Column(JSON)              # structured scores/observations
+    video_analysis_status = Column(String(20), default="Pending")  # Pending/Processing/Completed/Failed
+
     session = relationship("JobLensSession", back_populates="candidates")
 
 
@@ -332,6 +375,7 @@ class JDDocument(Base):
     __tablename__ = "tiq_jd_documents"
 
     id                  = Column(Integer, primary_key=True, index=True)
+    sequence_number = Column(Integer)  # per-user sequential display number (1, 2, 3...)
     user_id             = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
     role_title          = Column(String(300), nullable=False)
     company_name        = Column(String(300))
@@ -362,6 +406,7 @@ class CVAnalysisRecord(Base):
     __tablename__ = "tiq_cvanalysis_records"
 
     id                = Column(Integer, primary_key=True, index=True)
+    sequence_number = Column(Integer)  # per-user sequential display number (1, 2, 3...)
     user_id           = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
     source_name       = Column(String(300))         # resume filename, or "Resume"
     overall_score     = Column(Float, default=0.0)
@@ -371,3 +416,122 @@ class CVAnalysisRecord(Base):
     created_at        = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="cvanalysis_records")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# JD MANAGEMENT / VENDOR MANAGEMENT / CANDIDATE TRACKING
+# A separate hiring-lifecycle tracker: JDs move through a status pipeline,
+# vendors submit candidates against JDs, and candidates are tracked
+# end-to-end independent of any single JD or vendor view.
+# ══════════════════════════════════════════════════════════════════════════════
+
+JD_STATUSES = ["Open", "Shortlisting", "Interviewing", "Offer Stage", "Closed"]
+JD_IN_PROGRESS_STATUSES = ["Shortlisting", "Interviewing", "Offer Stage"]
+
+CANDIDATE_STATUSES = [
+    "Applied", "Shortlisted", "Interview Scheduled", "Interview Completed",
+    "Selected", "Offered", "Rejected",
+]
+
+
+class JDRecord(Base):
+    __tablename__ = "tiq_jd_records"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    user_id         = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
+    sequence_number = Column(Integer)             # per-user sequential display number (1, 2, 3...)
+    title           = Column(String(300), nullable=False)
+    company_name    = Column(String(300))         # legacy free-text client name — kept for backward compatibility
+    client_id       = Column(Integer, ForeignKey("tiq_clients.id"), nullable=True)  # proper link, new
+    status          = Column(String(30), default="Open")
+    description     = Column(Text)
+    created_at      = Column(DateTime, default=datetime.utcnow)
+    updated_at      = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user       = relationship("User", back_populates="jd_records")
+    client     = relationship("Client", back_populates="jds")
+    candidates = relationship("TrackedCandidate", back_populates="jd", cascade="all, delete-orphan")
+
+
+class Vendor(Base):
+    __tablename__ = "tiq_vendors"
+
+    id               = Column(Integer, primary_key=True, index=True)
+    user_id          = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
+    sequence_number  = Column(Integer)   # per-user sequential display number
+    name             = Column(String(300), nullable=False)
+    location         = Column(String(300))
+    contact_email    = Column(String(200))
+    contact_phone    = Column(String(50))
+    area_of_coverage = Column(String(300))   # e.g. "APAC", "Sydney/Melbourne", "Remote"
+    technical_area   = Column(String(300))   # e.g. "Data Engineering, Cloud"
+    company_details  = Column(Text)
+    created_at       = Column(DateTime, default=datetime.utcnow)
+    updated_at       = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user       = relationship("User", back_populates="vendors")
+    candidates = relationship("TrackedCandidate", back_populates="vendor", cascade="all, delete-orphan")
+
+
+class Client(Base):
+    __tablename__ = "tiq_clients"
+
+    id                = Column(Integer, primary_key=True, index=True)
+    user_id           = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
+    name              = Column(String(300), nullable=False)
+    location          = Column(String(300))
+    abn               = Column(String(50))
+    partnership_from  = Column(DateTime)      # partnership start date
+    area_of_work      = Column(String(300))
+    created_at        = Column(DateTime, default=datetime.utcnow)
+    updated_at        = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", back_populates="clients")
+    jds  = relationship("JDRecord", back_populates="client")
+
+
+class TrackedCandidate(Base):
+    __tablename__ = "tiq_tracked_candidates"
+
+    id               = Column(Integer, primary_key=True, index=True)
+    user_id          = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
+    jd_id            = Column(Integer, ForeignKey("tiq_jd_records.id"), nullable=False)
+    vendor_id        = Column(Integer, ForeignKey("tiq_vendors.id"), nullable=False)
+    name             = Column(String(200), nullable=False)
+    email            = Column(String(200))
+    phone            = Column(String(50))
+    resume_blob      = Column(LargeBinary)
+    resume_filename  = Column(String(300))
+    resume_mimetype  = Column(String(100))
+    status           = Column(String(30), default="Applied")
+
+    # Duplicate handling: the FIRST submitted candidate for a given JD with
+    # matching email/phone stays primary (is_duplicate=False); any later
+    # submission from any vendor gets flagged, but is kept as its own row
+    # (not merged/discarded) so vendor attribution is fully auditable.
+    is_duplicate    = Column(Boolean, default=False)
+    duplicate_of_id = Column(Integer, ForeignKey("tiq_tracked_candidates.id"), nullable=True)
+
+    submitted_at = Column(DateTime, default=datetime.utcnow)
+    created_at   = Column(DateTime, default=datetime.utcnow)
+    updated_at   = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user         = relationship("User", back_populates="tracked_candidates")
+    jd           = relationship("JDRecord", back_populates="candidates")
+    vendor       = relationship("Vendor", back_populates="candidates")
+    status_logs  = relationship(
+        "CandidateStatusLog", back_populates="candidate",
+        cascade="all, delete-orphan", foreign_keys="CandidateStatusLog.candidate_id",
+    )
+
+
+class CandidateStatusLog(Base):
+    __tablename__ = "tiq_candidate_status_log"
+
+    id           = Column(Integer, primary_key=True, index=True)
+    candidate_id = Column(Integer, ForeignKey("tiq_tracked_candidates.id"), nullable=False)
+    old_status   = Column(String(30))
+    new_status   = Column(String(30))
+    changed_at   = Column(DateTime, default=datetime.utcnow)
+
+    candidate = relationship("TrackedCandidate", back_populates="status_logs", foreign_keys=[candidate_id])

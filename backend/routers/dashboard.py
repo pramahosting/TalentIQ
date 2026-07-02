@@ -12,6 +12,7 @@ from db.database import get_db
 from models.models import (
     User, JobSearch, Job, JobMatch, JobIntelRun, JobIntelRecord,
     LinkLensSearch, LinkedInProfile, JobLensSession, JobLensCandidate,
+    JDRecord, JD_IN_PROGRESS_STATUSES,
 )
 from schemas.schemas import DashboardStats
 from utils.auth_utils import get_current_user
@@ -89,6 +90,14 @@ async def get_dashboard_stats(
         if avg_candidate_score_result is not None else 0.0
     )
 
+    # ── JD Management (Candidate Tracker) ────────────────────────────────
+    jd_statuses_r = await db.execute(select(JDRecord.status).where(JDRecord.user_id == uid))
+    jd_statuses = [s for (s,) in jd_statuses_r.all()]
+    total_jds = len(jd_statuses)
+    open_jds = sum(1 for s in jd_statuses if s == "Open")
+    in_progress_jds = sum(1 for s in jd_statuses if s in JD_IN_PROGRESS_STATUSES)
+    closed_jds = sum(1 for s in jd_statuses if s == "Closed")
+
     return DashboardStats(
         total_job_searches=total_searches,
         total_jobs_found=total_jobs,
@@ -101,5 +110,9 @@ async def get_dashboard_stats(
         total_joblens_sessions=total_joblens_sessions,
         total_candidates=total_candidates,
         avg_candidate_score=avg_candidate_score,
+        total_jds=total_jds,
+        open_jds=open_jds,
+        in_progress_jds=in_progress_jds,
+        closed_jds=closed_jds,
         recent_activity=[],
     )

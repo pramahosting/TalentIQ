@@ -12,6 +12,49 @@ from db.database import engine
 from sqlalchemy import text
 
 MIGRATIONS = [
+    # Per-user sequential numbering (session numbers isolated per user)
+    "ALTER TABLE tiq_job_searches ADD COLUMN IF NOT EXISTS sequence_number INTEGER",
+    "ALTER TABLE tiq_jobintel_runs ADD COLUMN IF NOT EXISTS sequence_number INTEGER",
+    "ALTER TABLE tiq_linklens_searches ADD COLUMN IF NOT EXISTS sequence_number INTEGER",
+    "ALTER TABLE tiq_joblens_sessions ADD COLUMN IF NOT EXISTS sequence_number INTEGER",
+    "ALTER TABLE tiq_jd_documents ADD COLUMN IF NOT EXISTS sequence_number INTEGER",
+    "ALTER TABLE tiq_cvanalysis_records ADD COLUMN IF NOT EXISTS sequence_number INTEGER",
+    "ALTER TABLE tiq_jd_records ADD COLUMN IF NOT EXISTS sequence_number INTEGER",
+    "ALTER TABLE tiq_vendors ADD COLUMN IF NOT EXISTS sequence_number INTEGER",
+
+    # Vendor Management: new profile fields
+    "ALTER TABLE tiq_vendors ADD COLUMN IF NOT EXISTS location VARCHAR(300)",
+    "ALTER TABLE tiq_vendors ADD COLUMN IF NOT EXISTS area_of_coverage VARCHAR(300)",
+    "ALTER TABLE tiq_vendors ADD COLUMN IF NOT EXISTS technical_area VARCHAR(300)",
+
+    # JD Management: proper Client link (company_name kept as legacy fallback)
+    "ALTER TABLE tiq_jd_records ADD COLUMN IF NOT EXISTS client_id INTEGER",
+
+    # CandidateLens: optional link to a JD Management record, categorized
+    # requirements, and denormalized client name for the summary panel
+    "ALTER TABLE tiq_joblens_sessions ADD COLUMN IF NOT EXISTS jd_record_id INTEGER",
+    "ALTER TABLE tiq_joblens_sessions ADD COLUMN IF NOT EXISTS jd_client_name VARCHAR(300)",
+    "ALTER TABLE tiq_joblens_sessions ADD COLUMN IF NOT EXISTS jd_essential_skills JSON DEFAULT '[]'",
+    "ALTER TABLE tiq_joblens_sessions ADD COLUMN IF NOT EXISTS jd_good_to_have_skills JSON DEFAULT '[]'",
+    "ALTER TABLE tiq_joblens_sessions ADD COLUMN IF NOT EXISTS jd_optional_skills JSON DEFAULT '[]'",
+
+    # CandidateLens: candidate sourced from Vendor Management instead of a
+    # raw manual CV upload
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS source_vendor_id INTEGER",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS source_vendor_name VARCHAR(300)",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS source_tracked_candidate_id INTEGER",
+
+    "ALTER TABLE tiq_user_api_keys ADD COLUMN IF NOT EXISTS is_global BOOLEAN DEFAULT FALSE NOT NULL",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS resume_file_blob BYTEA",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS resume_file_mimetype VARCHAR(100)",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS video_blob BYTEA",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS video_mimetype VARCHAR(50) DEFAULT 'video/webm'",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS video_transcript TEXT",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS video_analysis JSON",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS video_analysis_status VARCHAR(20) DEFAULT 'Pending'",
+    "ALTER TABLE tiq_joblens_sessions ADD COLUMN IF NOT EXISTS jd_role VARCHAR(300)",
+    "ALTER TABLE tiq_joblens_sessions ADD COLUMN IF NOT EXISTS jd_location VARCHAR(300)",
+    "ALTER TABLE tiq_joblens_sessions ADD COLUMN IF NOT EXISTS jd_company VARCHAR(300)",
     "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS experience_years VARCHAR(20)",
     "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS summary TEXT",
     "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS resume_summary JSON DEFAULT '[]'",

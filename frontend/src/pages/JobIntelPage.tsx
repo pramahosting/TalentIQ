@@ -177,7 +177,7 @@ export default function MarketIntelPage() {
               onChange={id => setSelectedRunId(id as number | null)}
               options={runs.map((run: any) => ({
                 id: run.id,
-                label: `${run.industry || run.role} · ${run.location} · ${run.total_jobs_scraped} jobs · ${run.status} · ${new Date(run.created_at).toLocaleDateString()}`,
+                label: `#${run.sequence_number || run.id} · ${run.industry || run.role} · ${run.location} · ${run.total_jobs_scraped} jobs · ${run.status} · ${new Date(run.created_at).toLocaleDateString()}`,
               }))}
               onDelete={id => deleteMutation.mutate(id as number)}
               placeholder="Select a past run…"

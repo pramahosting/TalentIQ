@@ -20,6 +20,7 @@ from routers import admin as admin_router
 from routers import cvintel as cvintel_router
 from routers import joblens as joblens_router
 from routers import jdcreator as jdcreator_router
+from routers import candidatetrack as candidatetrack_router
 
 
 @asynccontextmanager
@@ -70,6 +71,7 @@ app.include_router(admin_router.router,   prefix="/api/admin",     tags=["Admin"
 app.include_router(cvintel_router.router, prefix="/api/cvintel",   tags=["CVIntel"])
 app.include_router(joblens_router.router, prefix="/api/joblens",   tags=["JobLens"])
 app.include_router(jdcreator_router.router, prefix="/api/jdcreator", tags=["JDCreator"])
+app.include_router(candidatetrack_router.router, prefix="/api/candidatetrack", tags=["CandidateTracker"])
 
 
 @app.get("/health")

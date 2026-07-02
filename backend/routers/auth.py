@@ -165,7 +165,21 @@ async def save_api_key(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Replace if same service+key_name exists
+    # is_global is a privileged flag: only an admin may set it, and only for
+    # the services explicitly allowed to be shared (see utils/credentials.py).
+    # Any other combination is silently coerced to False rather than
+    # rejected outright, so a non-admin's request still succeeds — it just
+    # saves as a normal private key instead of a platform-wide one.
+    from utils.credentials import SHAREABLE_SERVICES
+    is_global = bool(
+        payload.is_global
+        and current_user.role == "admin"
+        and payload.service in SHAREABLE_SERVICES
+    )
+
+    # Replace if same service+key_name exists for THIS user (global keys are
+    # still stored under the admin's own user_id — is_global is what makes
+    # them visible platform-wide, not a change of ownership).
     result = await db.execute(
         select(UserAPIKey).where(
             UserAPIKey.user_id == current_user.id,
@@ -176,6 +190,7 @@ async def save_api_key(
     existing = result.scalar_one_or_none()
     if existing:
         existing.key_value = payload.key_value
+        existing.is_global = is_global
         return APIKeyOut.model_validate(existing)
 
     key = UserAPIKey(
@@ -183,6 +198,7 @@ async def save_api_key(
         service=payload.service,
         key_name=payload.key_name,
         key_value=payload.key_value,
+        is_global=is_global,
     )
     db.add(key)
     await db.flush()
@@ -200,20 +216,37 @@ async def list_api_keys(
     return [APIKeyOut.model_validate(k) for k in result.scalars().all()]
 
 
+@router.get("/global-keys", response_model=List[APIKeyOut])
+async def list_global_keys(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Visible to every user (not just admins) so people can see which
+    shared services (Groq/Ollama/Adzuna) are already configured platform-
+    wide — never returns the actual secret value, same as /api-keys."""
+    result = await db.execute(
+        select(UserAPIKey).where(UserAPIKey.is_global.is_(True))
+    )
+    return [APIKeyOut.model_validate(k) for k in result.scalars().all()]
+
+
 @router.delete("/api-keys/{key_id}")
 async def delete_api_key(
     key_id: int,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(UserAPIKey).where(
-            UserAPIKey.id == key_id,
-            UserAPIKey.user_id == current_user.id,
-        )
-    )
+    result = await db.execute(select(UserAPIKey).where(UserAPIKey.id == key_id))
     key = result.scalar_one_or_none()
     if not key:
+        raise HTTPException(status_code=404, detail="API key not found")
+    # A global key may be managed by any admin (not just the one who
+    # originally saved it); every other key is strictly private to its
+    # owner, admins included — an admin cannot delete another user's
+    # private LinkedIn/SMTP/MorphCast credentials.
+    is_owner = key.user_id == current_user.id
+    is_admin_managing_global = key.is_global and current_user.role == "admin"
+    if not (is_owner or is_admin_managing_global):
         raise HTTPException(status_code=404, detail="API key not found")
     await db.delete(key)
     return {"message": "Deleted"}

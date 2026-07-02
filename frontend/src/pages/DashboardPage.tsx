@@ -1,20 +1,52 @@
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Search, BarChart2, Users, Star, Briefcase, Target, Activity , Home} from "lucide-react";
+import { Search, BarChart2, Users, Star, Briefcase, Target, Activity, Home, FileText, FolderOpen, Loader2, CheckCircle2 } from "lucide-react";
 import { dashboardApi } from "../lib/api";
 import { Link } from "react-router-dom";
 
-const STAT_CARDS = [
-  { key: "total_job_searches", label: "Job Searches", icon: Search, color: "#00c7b7", bg: "rgba(0,199,183,.1)" },
-  { key: "total_jobs_found", label: "Jobs Found", icon: Briefcase, color: "#3b82f6", bg: "rgba(59,130,246,.1)" },
-  { key: "total_matches", label: "Resume Matches", icon: Target, color: "#8b5cf6", bg: "rgba(139,92,246,.1)" },
-  { key: "avg_ats_score", label: "Avg ATS Score", icon: Star, color: "#f59e0b", bg: "rgba(245,158,11,.1)", suffix: "%" },
-  { key: "total_intel_runs", label: "Intel Runs", icon: BarChart2, color: "#ec4899", bg: "rgba(236,72,153,.1)" },
-  { key: "total_intel_jobs", label: "Market Jobs Analysed", icon: BarChart2, color: "#ec4899", bg: "rgba(236,72,153,.1)" },
-  { key: "total_linkedin_searches", label: "LinkedIn Searches", icon: Users, color: "#10b981", bg: "rgba(16,185,129,.1)" },
-  { key: "total_profiles_found", label: "Profiles Found", icon: Users, color: "#10b981", bg: "rgba(16,185,129,.1)" },
-  { key: "total_joblens_sessions", label: "CandidateLens Sessions", icon: Briefcase, color: "#f43f5e", bg: "rgba(244,63,94,.1)" },
-  { key: "total_candidates", label: "Candidates Scored", icon: Target, color: "#f43f5e", bg: "rgba(244,63,94,.1)" },
+// Grouped by module, in display order — CandidateLens first (it now also
+// covers JD Management), then MarketIntel, then LinkExplore, then the
+// remaining modules.
+const MODULE_SECTIONS = [
+  {
+    module: "CandidateLens",
+    color: "#f43f5e",
+    cards: [
+      { key: "total_joblens_sessions", label: "Sessions", icon: Briefcase, color: "#f43f5e", bg: "rgba(244,63,94,.1)" },
+      { key: "total_candidates", label: "Candidates Scored", icon: Target, color: "#f43f5e", bg: "rgba(244,63,94,.1)" },
+      { key: "avg_candidate_score", label: "Avg Candidate Score", icon: Star, color: "#f43f5e", bg: "rgba(244,63,94,.1)", suffix: "%" },
+      { key: "total_jds", label: "Total JDs", icon: FileText, color: "#6366f1", bg: "rgba(99,102,241,.1)" },
+      { key: "open_jds", label: "Open JDs", icon: FolderOpen, color: "#10b981", bg: "rgba(16,185,129,.1)" },
+      { key: "in_progress_jds", label: "JDs In Progress", icon: Loader2, color: "#f59e0b", bg: "rgba(245,158,11,.1)" },
+      { key: "closed_jds", label: "Closed JDs", icon: CheckCircle2, color: "#6b7280", bg: "rgba(107,114,128,.1)" },
+    ],
+  },
+  {
+    module: "MarketIntel",
+    color: "#ec4899",
+    cards: [
+      { key: "total_intel_runs", label: "Intel Runs", icon: BarChart2, color: "#ec4899", bg: "rgba(236,72,153,.1)" },
+      { key: "total_intel_jobs", label: "Market Jobs Analysed", icon: BarChart2, color: "#ec4899", bg: "rgba(236,72,153,.1)" },
+    ],
+  },
+  {
+    module: "LinkExplore",
+    color: "#10b981",
+    cards: [
+      { key: "total_linkedin_searches", label: "LinkedIn Searches", icon: Users, color: "#10b981", bg: "rgba(16,185,129,.1)" },
+      { key: "total_profiles_found", label: "Profiles Found", icon: Users, color: "#10b981", bg: "rgba(16,185,129,.1)" },
+    ],
+  },
+  {
+    module: "JobHunter",
+    color: "#00c7b7",
+    cards: [
+      { key: "total_job_searches", label: "Job Searches", icon: Search, color: "#00c7b7", bg: "rgba(0,199,183,.1)" },
+      { key: "total_jobs_found", label: "Jobs Found", icon: Briefcase, color: "#3b82f6", bg: "rgba(59,130,246,.1)" },
+      { key: "total_matches", label: "Resume Matches", icon: Target, color: "#8b5cf6", bg: "rgba(139,92,246,.1)" },
+      { key: "avg_ats_score", label: "Avg ATS Score", icon: Star, color: "#f59e0b", bg: "rgba(245,158,11,.1)", suffix: "%" },
+    ],
+  },
 ];
 
 export default function DashboardPage() {
@@ -28,26 +60,33 @@ export default function DashboardPage() {
   return (
     <div>
       <div className="tiq-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
-        <h1 className="tiq-page-title">Dashboard</h1>
+        <h1 className="tiq-page-title">Management Dashboard</h1>
         <p className="tiq-page-sub">Your TalentIQ activity at a glance</p>
       </div>
 
-      {/* STATS */}
-      <div className="tiq-stats-grid">
-        {STAT_CARDS.map(({ key, label, icon: Icon, color, bg, suffix }) => (
-          <div key={key} className="tiq-stat-card">
-            <div className="tiq-stat-icon" style={{ background: bg }}>
-              <Icon size={18} color={color} />
-            </div>
-            <div className="tiq-stat-label">{label}</div>
-            <div className="tiq-stat-value">
-              {isLoading ? "—" : (
-                (stats?.[key as keyof typeof stats] ?? 0) + (suffix || "")
-              )}
-            </div>
+      {/* STATS — one clearly separated section per module */}
+      {MODULE_SECTIONS.map(({ module, color, cards }) => (
+        <div key={module} className="tiq-card tiq-mb-6" style={{ borderLeft: `4px solid ${color}` }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text-primary)", fontFamily: "var(--font-display)", marginBottom: 14 }}>
+            {module}
           </div>
-        ))}
-      </div>
+          <div className="tiq-stats-grid" style={{ marginBottom: 0 }}>
+            {cards.map(({ key, label, icon: Icon, color: cardColor, bg, suffix }) => (
+              <div key={key} className="tiq-stat-card">
+                <div className="tiq-stat-icon" style={{ background: bg }}>
+                  <Icon size={18} color={cardColor} />
+                </div>
+                <div className="tiq-stat-label">{label}</div>
+                <div className="tiq-stat-value">
+                  {isLoading ? "—" : (
+                    (stats?.[key as keyof typeof stats] ?? 0) + (suffix || "")
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
 
       {/* QUICK ACTIONS */}
       <div className="tiq-grid-3 tiq-mb-6" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>

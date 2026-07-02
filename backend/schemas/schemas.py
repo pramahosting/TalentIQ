@@ -66,12 +66,14 @@ class APIKeyCreate(BaseModel):
     service: str
     key_name: str
     key_value: str
+    is_global: bool = False   # only honoured for admins + shareable services; see routers/auth.py
 
 
 class APIKeyOut(BaseModel):
     id: int
     service: str
     key_name: str
+    is_global: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -108,6 +110,7 @@ class JobOut(BaseModel):
 
 class JobSearchOut(BaseModel):
     id: int
+    sequence_number: Optional[int] = None
     role: str
     location: Optional[str] = None
     results_count: int
@@ -261,4 +264,8 @@ class DashboardStats(BaseModel):
     total_joblens_sessions: int = 0
     total_candidates: int = 0
     avg_candidate_score: float = 0.0
+    total_jds: int = 0
+    open_jds: int = 0
+    in_progress_jds: int = 0
+    closed_jds: int = 0
     recent_activity: List[Any] = []

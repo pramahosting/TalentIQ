@@ -15,6 +15,7 @@ import os
 import json
 import secrets
 import smtplib
+import requests
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -30,8 +31,64 @@ from pydantic import BaseModel
 from db.database import get_db, AsyncSessionLocal
 from models.models import User, UserAPIKey, JobLensSession, JobLensCandidate
 from utils.auth_utils import get_current_user
+from utils.credentials import get_credential, get_all_credentials
+from utils.sequencing import next_sequence_number
 
 router = APIRouter()
+
+
+@router.get("/jd-options")
+async def list_jd_options(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """JD Management records for the 'New Analysis' JD-selection dropdown,
+    including Client Name so it can be shown alongside the title."""
+    from models.models import JDRecord, Client as ClientModel
+    r = await db.execute(
+        select(JDRecord).where(JDRecord.user_id == current_user.id).order_by(JDRecord.created_at.desc())
+    )
+    jds = r.scalars().all()
+    out = []
+    for jd in jds:
+        client_name = jd.company_name or ""
+        if jd.client_id:
+            cr = await db.execute(select(ClientModel).where(ClientModel.id == jd.client_id))
+            client = cr.scalar_one_or_none()
+            if client:
+                client_name = client.name
+        out.append({"id": jd.id, "jd_title": jd.title, "client_name": client_name, "status": jd.status})
+    return out
+
+
+@router.get("/vendor-candidates")
+async def list_vendor_candidates_for_jd(
+    jd_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """TrackedCandidates (Vendor Management submissions) for a specific JD —
+    dynamically filtered so 'New Analysis' only offers vendors/candidates
+    actually relevant to the selected JD."""
+    from models.models import TrackedCandidate, Vendor as VendorModel
+    r = await db.execute(
+        select(TrackedCandidate).where(TrackedCandidate.jd_id == jd_id, TrackedCandidate.user_id == current_user.id)
+        .order_by(TrackedCandidate.created_at.desc())
+    )
+    candidates = r.scalars().all()
+    out = []
+    for c in candidates:
+        vr = await db.execute(select(VendorModel).where(VendorModel.id == c.vendor_id))
+        vendor = vr.scalar_one_or_none()
+        out.append({
+            "id": c.id,
+            "name": c.name,
+            "vendor_id": c.vendor_id,
+            "vendor_name": vendor.name if vendor else "",
+            "has_resume": bool(c.resume_blob),
+            "status": c.status,
+        })
+    return out
 
 
 # ── TEXT EXTRACTION ─────────────────────────────────────────────────────────
@@ -217,33 +274,82 @@ def extract_candidate_info(text: str, filename: str) -> dict:
 
 # ── SKILL EXTRACTION FROM JD (LLM) ──────────────────────────────────────────
 
-async def extract_skills_from_jd(jd_text: str, groq_key: str) -> list:
-    """Mirrors buildKeywordExtractPrompt + callOllamaGenerate — uses Groq instead."""
+_PLACEHOLDER_VALUES = {
+    "nil", "n/a", "na", "none", "-", "--", "tbd", "tba", "blank", "n.a.",
+    "not specified", "not applicable", "unknown", "null",
+}
+
+
+def _clean_extracted_field(value: Optional[str]) -> str:
+    """Drops obviously-blank template placeholders (a JD table cell that
+    literally says "Nil" or "N/A" is not a real role/location/company —
+    treating it as one was the source of the "ROLE: Nil" bug)."""
+    if not value:
+        return ""
+    v = value.strip()
+    if not v or v.lower() in _PLACEHOLDER_VALUES or len(v) > 120:
+        return ""
+    return v
+
+
+async def extract_jd_details(jd_text: str, groq_key: str) -> dict:
+    """Extracts role title, location, company, and skills (categorized into
+    Essential / Good to Have / Optional) from the JD in a single LLM call —
+    used for both the CandidateLens "Job Description Summary" panel and the
+    skill-matching logic below."""
     try:
         from langchain_groq import ChatGroq
         from langchain.schema import HumanMessage
 
         llm = ChatGroq(api_key=groq_key, model="llama3-70b-8192", temperature=0.1)
-        prompt = f"""You are a recruitment AI assistant.
-Extract the most important role-related keywords from the Job Description below.
-These keywords should reflect skills, tools, certifications, and responsibilities.
+        prompt = f"""You are a recruitment AI assistant. Read the job description below and
+extract these fields precisely. If a field genuinely isn't stated anywhere
+in the text, return an empty string for it — do NOT guess, and do NOT
+return placeholder text like "Nil", "N/A", or "TBD" as if it were a real
+value.
+
+Also categorize every required/desired skill or requirement into exactly
+one of three tiers, based on how the JD phrases it:
+- "essential": stated as required/must-have/mandatory
+- "good_to_have": stated as preferred/desirable/advantageous but not mandatory
+- "optional": mentioned only in passing, or a minor/bonus item
 
 Job Description:
 \"\"\"{jd_text[:3000]}\"\"\"
 
 Return ONLY valid JSON in this format:
 {{
-  "role": "<job role>",
-  "skills": ["skill1", "skill2", "skill3"]
+  "role": "<job title, or empty string if not stated>",
+  "location": "<work location/city, or empty string if not stated>",
+  "company": "<hiring company name, or empty string if not stated>",
+  "essential": ["skill1", "skill2"],
+  "good_to_have": ["skill3", "skill4"],
+  "optional": ["skill5"]
 }}"""
 
         resp = llm.invoke([HumanMessage(content=prompt)])
         raw = resp.content.strip().replace("```json", "").replace("```", "").strip()
         data = json.loads(raw)
-        skills = data.get("skills", [])
-        return [s.lower().strip() for s in skills if s]
+        essential = [s.lower().strip() for s in data.get("essential", []) if s]
+        good_to_have = [s.lower().strip() for s in data.get("good_to_have", []) if s]
+        optional = [s.lower().strip() for s in data.get("optional", []) if s]
+        return {
+            "role": _clean_extracted_field(data.get("role")),
+            "location": _clean_extracted_field(data.get("location")),
+            "company": _clean_extracted_field(data.get("company")),
+            "essential": essential,
+            "good_to_have": good_to_have,
+            "optional": optional,
+            "skills": list(dict.fromkeys(essential + good_to_have + optional)),  # flat list — existing scoring logic
+        }
     except Exception:
-        return _keyword_extract_jd(jd_text)
+        return _heuristic_jd_details(jd_text)
+
+
+async def extract_skills_from_jd(jd_text: str, groq_key: str) -> list:
+    """Kept for any other call sites that only want the skill list."""
+    details = await extract_jd_details(jd_text, groq_key)
+    return details["skills"]
 
 
 def _keyword_extract_jd(jd_text: str) -> list:
@@ -251,20 +357,46 @@ def _keyword_extract_jd(jd_text: str) -> list:
     DOMAIN_SKILLS = [
         "python","javascript","typescript","react","node","sql","postgresql","mongodb",
         "aws","azure","gcp","docker","kubernetes","git","agile","rest","api","graphql",
-        "machine learning","ai","data science","excel","power bi","tableau","salesforce",
+        "machine learning","ai","artificial intelligence","data science","excel","power bi","tableau","salesforce",
         "figma","django","flask","java","c#","c++","go","spark","kafka","dbt","snowflake",
         "databricks","redshift","bigquery","data architecture","data governance","etl",
+        "data mesh","data fabric","data vault","dimensional modelling","dimensional modeling",
+        "enterprise data warehouse","edw","lakehouse","master data management","mdm",
+        "data quality","data catalog","collibra","alation","informatica","talend",
+        "teradata","hive","hbase","adls","synapse","azure data factory","azure synapse",
+        "event-driven architecture","real-time data","streaming","enterprise architecture",
+        "solution architecture","zachman","basel","basel iii","banking","bfsi","insurance",
+        "lending","regulatory compliance","risk management","governance framework",
         "xero","myob","quickbooks","sap","oracle","dynamics","netsuite",
-        "cpa","ca","acca","cma","mba","cfa","accounting","tax","audit","payroll",
+        "cpa","ca","acca","cma","mba","cfa","phd","accounting","tax","audit","payroll",
         "financial reporting","budgeting","forecasting","reconciliation","ifrs","gaap",
         "leadership","communication","problem solving","scrum","project management",
-        "togaf","pmp","csm","hadoop","hive","datastage","tibco","react native",
+        "togaf","pmp","csm","hadoop","datastage","tibco","react native",
         "devops","ci/cd","terraform","ansible","linux","bash","swift","kotlin",
         "microservices","restful","graphql","redis","elasticsearch","rabbitmq",
     ]
     jd_lower = jd_text.lower()
     found = [s for s in DOMAIN_SKILLS if s in jd_lower]
     return list(dict.fromkeys(found))[:30]
+
+
+def _heuristic_jd_details(jd_text: str) -> dict:
+    """Non-LLM fallback for role/location/company — same placeholder
+    filtering as the LLM path, so a JD with a literal 'Position: Nil'
+    template field doesn't get treated as a real job title."""
+    role_m = re.search(r"(?:job\s*title|role|position\s*title)\s*[:\-]\s*(.+)", jd_text, re.IGNORECASE)
+    loc_m = re.search(r"(?:location|based\s*in|located\s*in)\s*[:\-]\s*(.+)", jd_text, re.IGNORECASE)
+    comp_m = re.search(r"(?:company|organisation|employer)\s*[:\-]\s*(.+)", jd_text, re.IGNORECASE)
+    skills = _keyword_extract_jd(jd_text)
+    return {
+        "role": _clean_extracted_field(role_m.group(1).split("\n")[0] if role_m else None),
+        "location": _clean_extracted_field(loc_m.group(1).split("\n")[0] if loc_m else None),
+        "company": _clean_extracted_field(comp_m.group(1).split("\n")[0] if comp_m else None),
+        "essential": skills,
+        "good_to_have": [],
+        "optional": [],
+        "skills": skills,
+    }
 
 
 # ── SCORING (mirrors calculateScore exactly) ─────────────────────────────────
@@ -457,13 +589,9 @@ def _fallback_resume_summary(cv_text: str) -> list:
 # ── SMTP EMAIL SENDING ────────────────────────────────────────────────────────
 
 async def _get_smtp_config(user_id: int, db: AsyncSession) -> dict:
-    kr = await db.execute(
-        select(UserAPIKey).where(
-            UserAPIKey.user_id == user_id,
-            UserAPIKey.service == "smtp",
-        )
-    )
-    return {k.key_name: k.key_value for k in kr.scalars().all()}
+    # SMTP is strictly private — never shared, never falls back to another
+    # user's or admin's credentials.
+    return await get_all_credentials(db, user_id, "smtp")
 
 
 def _send_email(smtp_cfg: dict, to_email: str, subject: str, html_body: str):
@@ -534,6 +662,13 @@ def _fmt(c: JobLensCandidate) -> dict:
         "emotion_disgust": c.emotion_disgust,
         "emotion_surprise": c.emotion_surprise,
         "dominant_emotion": c.dominant_emotion,
+        "has_resume_file": bool(c.resume_file_blob),
+        "has_video": bool(c.video_blob),
+        "video_transcript": c.video_transcript or "",
+        "video_analysis": c.video_analysis or None,
+        "video_analysis_status": c.video_analysis_status or "Pending",
+        "source_vendor_id": c.source_vendor_id,
+        "source_vendor_name": c.source_vendor_name or "",
     }
 
 
@@ -548,46 +683,81 @@ async def run_joblens(
     high_threshold: int = Form(70),
     jd_file: Optional[UploadFile] = File(None),
     cv_files: List[UploadFile] = File(default=[]),
+    jd_record_id: Optional[int] = Form(None),          # NEW: pull JD from JD Management instead of text/file
+    source_candidate_ids: str = Form(""),               # NEW: comma-separated TrackedCandidate ids from Vendor Management
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # ── Extract JD ────────────────────────────────────────────────────
+    # ── Extract JD — either from JD Management (new) or text/file upload (existing) ──
     final_jd = jd_text.strip()
-    if jd_file and jd_file.filename:
+    jd_client_name = ""
+    if jd_record_id:
+        from models.models import JDRecord, Client as ClientModel
+        jr = await db.execute(select(JDRecord).where(JDRecord.id == jd_record_id, JDRecord.user_id == current_user.id))
+        jd_record = jr.scalar_one_or_none()
+        if not jd_record:
+            raise HTTPException(404, "Selected JD not found.")
+        # Use the JD's stored description as the JD text; title/client used for the summary panel
+        final_jd = jd_record.description or jd_record.title
+        jd_client_name = jd_record.company_name or ""
+        if jd_record.client_id:
+            cr = await db.execute(select(ClientModel).where(ClientModel.id == jd_record.client_id))
+            client = cr.scalar_one_or_none()
+            if client:
+                jd_client_name = client.name
+    elif jd_file and jd_file.filename:
         raw = await jd_file.read()
         extracted = extract_text(raw, jd_file.filename)
         if extracted.strip():
             final_jd = extracted
+
+    # ── Resolve candidate sources: uploaded files (existing) + Vendor
+    #    Management submissions (new) — both can be used together.
+    from models.models import TrackedCandidate, Vendor as VendorModel
+    source_candidates = []
+    if source_candidate_ids.strip():
+        ids = [int(x) for x in source_candidate_ids.split(",") if x.strip().isdigit()]
+        if ids:
+            tcr = await db.execute(
+                select(TrackedCandidate).where(TrackedCandidate.id.in_(ids), TrackedCandidate.user_id == current_user.id)
+            )
+            source_candidates = tcr.scalars().all()
+
     if not final_jd:
         raise HTTPException(400, "Job description is required.")
-    if not cv_files:
-        raise HTTPException(400, "At least one CV is required.")
+    if not cv_files and not source_candidates:
+        raise HTTPException(400, "At least one CV is required (upload files, or select candidates from Vendor Management).")
 
-    # ── Get Groq key ──────────────────────────────────────────────────
-    kr = await db.execute(
-        select(UserAPIKey).where(
-            UserAPIKey.user_id == current_user.id,
-            UserAPIKey.service == "groq",
-        )
-    )
-    groq_key = next((k.key_value for k in kr.scalars().all() if k.key_name == "api_key"), None)
+    # ── Get Groq key (own key first, falls back to admin-configured global) ──
+    groq_key = await get_credential(db, current_user.id, "groq", "api_key")
 
-    # ── Extract JD skills (LLM or keyword) ───────────────────────────
+    # ── Extract JD details: role, location, company, categorized skills (LLM or heuristic) ──
     if groq_key:
-        jd_skills = await extract_skills_from_jd(final_jd, groq_key)
+        jd_details = await extract_jd_details(final_jd, groq_key)
     else:
-        jd_skills = _keyword_extract_jd(final_jd)
+        jd_details = _heuristic_jd_details(final_jd)
+    jd_skills = jd_details["skills"]
 
     # ── Create session ─────────────────────────────────────────────────
     try:
+        seq_num = await next_sequence_number(db, JobLensSession, current_user.id)
         session = JobLensSession(
+            sequence_number=seq_num,
             user_id=current_user.id,
             jd_text=final_jd,
             jd_skills=jd_skills,
+            jd_role=jd_details["role"],
+            jd_location=jd_details["location"],
+            jd_company=jd_details["company"],
+            jd_record_id=jd_record_id,
+            jd_client_name=jd_client_name,
+            jd_essential_skills=jd_details.get("essential", []),
+            jd_good_to_have_skills=jd_details.get("good_to_have", []),
+            jd_optional_skills=jd_details.get("optional", []),
             low_threshold=low_threshold,
             high_threshold=high_threshold,
             status="completed",
-            cv_count=len(cv_files),
+            cv_count=len(cv_files) + len(source_candidates),
             created_at=datetime.utcnow(),
         )
         db.add(session)
@@ -597,57 +767,101 @@ async def run_joblens(
         raise HTTPException(500, f"DB error creating session: {str(e)}")
 
     # ── Score each CV ──────────────────────────────────────────────────
+    async def _score_and_build_candidate(
+        content: bytes, filename: str,
+        source_vendor_id=None, source_vendor_name=None, source_tracked_candidate_id=None,
+    ):
+        cv_text = extract_text(content, filename)
+        if not cv_text.strip():
+            return None
+
+        info   = extract_candidate_info(cv_text, filename)
+        result = calculate_score(cv_text, jd_skills)
+
+        score  = result["score"]
+        status = "Not Qualified"
+        if score >= high_threshold:
+            status = "Qualified"
+        elif score >= low_threshold:
+            status = "Review"
+
+        if groq_key:
+            questions = await generate_questions(final_jd, info["name"], result["matched"], groq_key)
+        else:
+            questions = _default_questions(info["name"], result["matched"])
+
+        resume_summary = await generate_resume_summary(cv_text, groq_key)
+
+        fname_lower = (filename or "").lower()
+        if fname_lower.endswith(".pdf"):
+            resume_mimetype = "application/pdf"
+        elif fname_lower.endswith(".docx"):
+            resume_mimetype = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        elif fname_lower.endswith(".doc"):
+            resume_mimetype = "application/msword"
+        else:
+            resume_mimetype = "text/plain"
+
+        return JobLensCandidate(
+            session_id=session.id,
+            name=info["name"],
+            email=info["email"],
+            phone=info["phone"],
+            filename=filename,
+            ats_score=score,
+            status=status,
+            matched_skills=result["matched"],
+            missing_skills=result["gap"],
+            bonus=result["bonus"],
+            bonus_reasons=result["reasons"],
+            experience_years=info.get("experience_years", ""),
+            summary=info.get("summary", ""),
+            resume_summary=resume_summary,
+            interview_questions=questions,
+            video_status="Pending",
+            shortlisted=False,
+            resume_file_blob=content,
+            resume_file_mimetype=resume_mimetype,
+            source_vendor_id=source_vendor_id,
+            source_vendor_name=source_vendor_name,
+            source_tracked_candidate_id=source_tracked_candidate_id,
+        )
+
     candidates = []
     for upload in cv_files:
         try:
             content = await upload.read()
-            cv_text = extract_text(content, upload.filename)
-            if not cv_text.strip():
-                continue
-
-            info   = extract_candidate_info(cv_text, upload.filename)
-            result = calculate_score(cv_text, jd_skills)
-
-            score  = result["score"]
-            status = "Not Qualified"
-            if score >= high_threshold:
-                status = "Qualified"
-            elif score >= low_threshold:
-                status = "Review"
-
-            # Generate questions and resume summary immediately if Groq available
-            if groq_key:
-                questions = await generate_questions(
-                    final_jd, info["name"], result["matched"], groq_key
-                )
-            else:
-                questions = _default_questions(info["name"], result["matched"])
-
-            resume_summary = await generate_resume_summary(cv_text, groq_key)
-
-            candidate = JobLensCandidate(
-                session_id=session.id,
-                name=info["name"],
-                email=info["email"],
-                phone=info["phone"],
-                filename=upload.filename,
-                ats_score=score,
-                status=status,
-                matched_skills=result["matched"],
-                missing_skills=result["gap"],
-                bonus=result["bonus"],
-                bonus_reasons=result["reasons"],
-                experience_years=info.get("experience_years", ""),
-                summary=info.get("summary", ""),
-                resume_summary=resume_summary,
-                interview_questions=questions,
-                video_status="Pending",
-                shortlisted=False,
-            )
-            db.add(candidate)
-            candidates.append(candidate)
+            candidate = await _score_and_build_candidate(content, upload.filename)
+            if candidate:
+                db.add(candidate)
+                candidates.append(candidate)
         except Exception as e:
             print(f"Error processing {upload.filename}: {e}")
+            continue
+
+    # ── Score candidates sourced from Vendor Management submissions ──────
+    for tc in source_candidates:
+        try:
+            if not tc.resume_blob:
+                continue
+            vendor_row = await db.execute(select(VendorModel).where(VendorModel.id == tc.vendor_id))
+            vendor = vendor_row.scalar_one_or_none()
+            candidate = await _score_and_build_candidate(
+                tc.resume_blob, tc.resume_filename or f"{tc.name}.pdf",
+                source_vendor_id=tc.vendor_id,
+                source_vendor_name=vendor.name if vendor else "",
+                source_tracked_candidate_id=tc.id,
+            )
+            if candidate:
+                # Prefer the vendor-submitted contact details if the resume
+                # parse didn't find them
+                candidate.name = tc.name or candidate.name
+                candidate.email = candidate.email or tc.email or ""
+                candidate.phone = candidate.phone or tc.phone or ""
+                db.add(candidate)
+                candidates.append(candidate)
+        except Exception as e:
+            print(f"Error processing vendor candidate {tc.id}: {e}")
             continue
 
     await db.commit()
@@ -677,7 +891,7 @@ async def list_sessions(
     )
     return [
         {
-            "id": s.id, "cv_count": s.cv_count,
+            "id": s.id, "sequence_number": s.sequence_number or s.id, "cv_count": s.cv_count,
             "low_threshold": s.low_threshold, "high_threshold": s.high_threshold,
             "status": s.status,
             "created_at": s.created_at.isoformat() if s.created_at else None,
@@ -713,8 +927,17 @@ async def get_session(
 
     return {
         "id": session.id,
+        "sequence_number": session.sequence_number or session.id,
         "jd_text": session.jd_text,
         "jd_skills": session.jd_skills,
+        "jd_role": session.jd_role or "",
+        "jd_location": session.jd_location or "",
+        "jd_company": session.jd_company or "",
+        "jd_record_id": session.jd_record_id,
+        "jd_client_name": session.jd_client_name or session.jd_company or "",
+        "jd_essential_skills": session.jd_essential_skills or [],
+        "jd_good_to_have_skills": session.jd_good_to_have_skills or [],
+        "jd_optional_skills": session.jd_optional_skills or [],
         "low_threshold": session.low_threshold,
         "high_threshold": session.high_threshold,
         "status": session.status,
@@ -752,13 +975,7 @@ async def get_questions(
     if candidate.interview_questions:
         return {"questions": candidate.interview_questions, "ai_powered": False}
 
-    kr = await db.execute(
-        select(UserAPIKey).where(
-            UserAPIKey.user_id == current_user.id,
-            UserAPIKey.service == "groq",
-        )
-    )
-    groq_key = next((k.key_value for k in kr.scalars().all() if k.key_name == "api_key"), None)
+    groq_key = await get_credential(db, current_user.id, "groq", "api_key")
 
     if groq_key:
         questions = await generate_questions(
@@ -868,13 +1085,7 @@ async def get_morphcast_key(
     video interview modal for facial emotion analysis. Not a sensitive
     secret in the traditional sense — MorphCast's SDK runs entirely in the
     browser and the key is visible in that SDK's own network calls anyway."""
-    kr = await db.execute(
-        select(UserAPIKey).where(
-            UserAPIKey.user_id == current_user.id,
-            UserAPIKey.service == "morphcast",
-        )
-    )
-    key = next((k.key_value for k in kr.scalars().all() if k.key_name == "license_key"), None)
+    key = await get_credential(db, current_user.id, "morphcast", "license_key")
     return {"license_key": key or ""}
 
 
@@ -915,7 +1126,218 @@ async def save_interview_result(
     return {"status": "saved"}
 
 
-# ── PUBLIC (candidate-facing, NO auth required) ──────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# AUTOMATIC VIDEO ANALYSIS — runs once the video blob is stored.
+# Transcribes via Groq's Whisper endpoint (accepts .webm directly, no ffmpeg
+# needed), then scores the transcript against the interview questions with
+# an LLM. Result is written back onto the SAME candidate row. Runs as a
+# FastAPI background task so the upload request returns immediately rather
+# than blocking on transcription + LLM latency.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _transcribe_video(video_bytes: bytes, mimetype: str, groq_key: str) -> str:
+    """Groq's /audio/transcriptions endpoint is OpenAI-Whisper-API-compatible
+    and accepts webm/mp4/mp3/wav/m4a/ogg directly — no local audio
+    extraction/conversion needed."""
+    resp = requests.post(
+        "https://api.groq.com/openai/v1/audio/transcriptions",
+        headers={"Authorization": f"Bearer {groq_key}"},
+        files={"file": ("interview.webm", video_bytes, mimetype or "video/webm")},
+        data={"model": "whisper-large-v3", "response_format": "text"},
+        timeout=180,
+        proxies={"http": None, "https": None},  # avoid any system proxy intercepting this call
+    )
+    resp.raise_for_status()
+    return resp.text.strip()
+
+
+async def _analyze_transcript(
+    transcript: str, questions: list, candidate_name: str, groq_key: str
+) -> dict:
+    from langchain_groq import ChatGroq
+    from langchain.schema import HumanMessage
+
+    llm = ChatGroq(api_key=groq_key, model="llama3-70b-8192", temperature=0.2)
+    questions_block = "\n".join(f"{i+1}. {q}" for i, q in enumerate(questions)) or "(not recorded)"
+    prompt = f"""You are an experienced hiring manager reviewing a recorded video
+interview transcript for {candidate_name}. Be fair and evidence-based — only
+comment on what the transcript actually supports.
+
+QUESTIONS ASKED:
+{questions_block}
+
+TRANSCRIPT (auto-generated, may contain minor recognition errors):
+\"\"\"{transcript[:6000]}\"\"\"
+
+Assess the candidate's spoken interview performance. Return ONLY valid JSON,
+no markdown, no commentary:
+{{
+  "communication_score": <0-100, clarity/structure of spoken answers>,
+  "relevance_score": <0-100, how directly answers addressed the questions asked>,
+  "confidence_score": <0-100, based on language used — decisiveness, specificity, hedging>,
+  "overall_score": <0-100, holistic>,
+  "strengths": ["<specific, evidence-based>", "..."],
+  "concerns": ["<specific, evidence-based>", "..."],
+  "key_observations": ["<notable moment or answer>", "..."],
+  "summary": "<3-4 sentence overall assessment>"
+}}"""
+    resp = llm.invoke([HumanMessage(content=prompt)])
+    raw = resp.content.strip()
+    raw = re.sub(r"```(?:json)?|```", "", raw).strip()
+    return json.loads(raw)
+
+
+async def _run_video_analysis(candidate_id: int):
+    """Background task — opens its OWN DB session since the request-scoped
+    one is already closed by the time this runs after the response returns."""
+    async with AsyncSessionLocal() as db:
+        try:
+            cr = await db.execute(
+                select(JobLensCandidate, JobLensSession)
+                .join(JobLensSession, JobLensCandidate.session_id == JobLensSession.id)
+                .where(JobLensCandidate.id == candidate_id)
+            )
+            row = cr.first()
+            if not row:
+                return
+            c, session = row
+
+            c.video_analysis_status = "Processing"
+            await db.commit()
+
+            groq_key = await get_credential(db, session.user_id, "groq", "api_key")
+            if not groq_key:
+                c.video_analysis_status = "Failed"
+                c.video_analysis = {"error": "No Groq API key configured (own or admin-shared) — required for transcription and analysis."}
+                await db.commit()
+                return
+
+            if not c.video_blob:
+                c.video_analysis_status = "Failed"
+                c.video_analysis = {"error": "No video stored for this candidate."}
+                await db.commit()
+                return
+
+            transcript = _transcribe_video(c.video_blob, c.video_mimetype, groq_key)
+            if not transcript:
+                c.video_analysis_status = "Failed"
+                c.video_analysis = {"error": "Transcription returned no speech content."}
+                await db.commit()
+                return
+
+            analysis = await _analyze_transcript(
+                transcript, c.interview_questions or [], c.name or "the candidate", groq_key
+            )
+
+            c.video_transcript = transcript
+            c.video_analysis = analysis
+            c.video_analysis_status = "Completed"
+            await db.commit()
+        except Exception as e:
+            try:
+                c.video_analysis_status = "Failed"
+                c.video_analysis = {"error": str(e)[:300]}
+                await db.commit()
+            except Exception:
+                pass
+
+
+@router.post("/candidates/{candidate_id}/video")
+async def upload_interview_video(
+    candidate_id: int,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Stores the recorded interview video as a blob on the candidate row,
+    alongside their resume — then kicks off automatic transcription +
+    performance analysis in the background, written back onto this same row."""
+    cr = await db.execute(
+        select(JobLensCandidate).where(JobLensCandidate.id == candidate_id)
+    )
+    c = cr.scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "Candidate not found")
+    content = await file.read()
+    c.video_blob = content
+    c.video_mimetype = file.content_type or "video/webm"
+    c.video_analysis_status = "Pending"
+    await db.commit()
+    background_tasks.add_task(_run_video_analysis, candidate_id)
+    return {"status": "saved", "size_bytes": len(content)}
+
+
+@router.post("/candidates/{candidate_id}/reanalyze-video")
+async def reanalyze_video(
+    candidate_id: int,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-runs transcription + performance analysis on the ALREADY-STORED
+    video for this candidate — no re-recording or re-upload needed. Useful
+    after adding a Groq key, or to re-check with updated interview
+    questions/context."""
+    cr = await db.execute(
+        select(JobLensCandidate).where(JobLensCandidate.id == candidate_id)
+    )
+    c = cr.scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "Candidate not found")
+    if not c.video_blob:
+        raise HTTPException(400, "No video stored for this candidate yet.")
+    c.video_analysis_status = "Pending"
+    await db.commit()
+    background_tasks.add_task(_run_video_analysis, candidate_id)
+    return {"status": "queued"}
+async def download_interview_video(
+    candidate_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    cr = await db.execute(
+        select(JobLensCandidate, JobLensSession)
+        .join(JobLensSession, JobLensCandidate.session_id == JobLensSession.id)
+        .where(JobLensCandidate.id == candidate_id)
+    )
+    row = cr.first()
+    if not row:
+        raise HTTPException(404, "Candidate not found")
+    c, session = row
+    # Row-level access control: only the owning recruiter or an admin may
+    # view this candidate's video — never any other user.
+    if session.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(404, "Candidate not found")
+    if not c.video_blob:
+        raise HTTPException(404, "No video recorded for this candidate")
+    return Response(content=c.video_blob, media_type=c.video_mimetype or "video/webm")
+
+
+@router.get("/candidates/{candidate_id}/resume-file")
+async def download_resume_file(
+    candidate_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    cr = await db.execute(
+        select(JobLensCandidate, JobLensSession)
+        .join(JobLensSession, JobLensCandidate.session_id == JobLensSession.id)
+        .where(JobLensCandidate.id == candidate_id)
+    )
+    row = cr.first()
+    if not row:
+        raise HTTPException(404, "Candidate not found")
+    c, session = row
+    if session.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(404, "Candidate not found")
+    if not c.resume_file_blob:
+        raise HTTPException(404, "No resume file stored for this candidate")
+    return Response(
+        content=c.resume_file_blob,
+        media_type=c.resume_file_mimetype or "application/octet-stream",
+        headers={"Content-Disposition": f'inline; filename="{c.filename or "resume"}"'},
+    )
 # These power the emailed video-interview link so a candidate can complete
 # the interview without a TalentIQ login. Access is gated by the unguessable
 # token, not a session/auth check.
@@ -950,13 +1372,7 @@ async def public_get_morphcast_key(token: str, db: AsyncSession = Depends(get_db
         raise HTTPException(404, "This interview link is invalid or has expired.")
     _, session = row
 
-    kr = await db.execute(
-        select(UserAPIKey).where(
-            UserAPIKey.user_id == session.user_id,
-            UserAPIKey.service == "morphcast",
-        )
-    )
-    key = next((k.key_value for k in kr.scalars().all() if k.key_name == "license_key"), None)
+    key = await get_credential(db, session.user_id, "morphcast", "license_key")
     return {"license_key": key or ""}
 
 
@@ -983,6 +1399,31 @@ async def public_save_interview_result(
     c.video_status     = "Completed"
     await db.commit()
     return {"status": "saved"}
+
+
+@router.post("/public/interview/{token}/video")
+async def public_upload_interview_video(
+    token: str,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Same as the authenticated video-upload endpoint, but reached via the
+    interview token so the candidate (no login) can submit their recorded
+    video directly from the public interview page."""
+    cr = await db.execute(
+        select(JobLensCandidate).where(JobLensCandidate.interview_token == token)
+    )
+    c = cr.scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "This interview link is invalid or has expired.")
+    content = await file.read()
+    c.video_blob = content
+    c.video_mimetype = file.content_type or "video/webm"
+    c.video_analysis_status = "Pending"
+    await db.commit()
+    background_tasks.add_task(_run_video_analysis, c.id)
+    return {"status": "saved", "size_bytes": len(content)}
 
 
 @router.get("/sessions/{session_id}/export")

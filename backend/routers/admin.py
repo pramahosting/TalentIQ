@@ -119,6 +119,23 @@ async def delete_row(
     return {"message": "Row deleted"}
 
 
+@router.delete("/tables/{table}/rows")
+async def bulk_delete_rows(
+    table: str,
+    payload: dict,
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    if not table.startswith("tiq_"):
+        raise HTTPException(403, "Only tiq_* tables are accessible")
+    ids = payload.get("ids", [])
+    if not ids:
+        raise HTTPException(400, "No row ids provided")
+    await db.execute(text(f'DELETE FROM "{table}" WHERE id = ANY(:ids)'), {"ids": ids})
+    await db.commit()
+    return {"message": f"Deleted {len(ids)} row(s)"}
+
+
 # ── INSERT ROW ───────────────────────────────────────────────────────
 
 @router.post("/tables/{table}/rows")

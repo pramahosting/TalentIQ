@@ -11,6 +11,7 @@ const adminApi = {
     api.get(`/api/admin/tables/${t}/rows`, { params: { page, page_size: 25, search } }).then(r => r.data),
   updateRow: (t: string, id: number, data: any) => api.put(`/api/admin/tables/${t}/rows/${id}`, { data }).then(r => r.data),
   deleteRow: (t: string, id: number) => api.delete(`/api/admin/tables/${t}/rows/${id}`).then(r => r.data),
+  bulkDeleteRows: (t: string, ids: number[]) => api.delete(`/api/admin/tables/${t}/rows`, { data: { ids } }).then(r => r.data),
   insertRow: (t: string, data: any) => api.post(`/api/admin/tables/${t}/rows`, { data }).then(r => r.data),
   query: (sql: string) => api.post("/api/admin/query", { sql }).then(r => r.data),
 };
@@ -51,6 +52,12 @@ export default function FileManagerPage() {
   const deleteMut = useMutation({
     mutationFn: (id: number) => adminApi.deleteRow(activeTable!, id),
     onSuccess: () => { refetchRows(); flash("Row deleted."); },
+  });
+
+  const [selectedRowIds, setSelectedRowIds] = useState<Array<number | string>>([]);
+  const bulkDeleteMut = useMutation({
+    mutationFn: (ids: number[]) => adminApi.bulkDeleteRows(activeTable!, ids),
+    onSuccess: (_data, ids) => { refetchRows(); setSelectedRowIds([]); flash(`Deleted ${ids.length} row(s).`); },
   });
 
   const insertMut = useMutation({
@@ -176,6 +183,12 @@ export default function FileManagerPage() {
                       {activeTable} <span style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 400 }}>({total} rows)</span>
                     </div>
                     <div style={{ display: "flex", gap: 8 }}>
+                      {selectedRowIds.length > 0 && (
+                        <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ color: "var(--rose-500)" }}
+                          onClick={() => { if (confirm(`Delete ${selectedRowIds.length} selected row(s)?`)) bulkDeleteMut.mutate(selectedRowIds as number[]); }}>
+                          <Trash2 size={12} /> Delete {selectedRowIds.length} selected
+                        </button>
+                      )}
                       <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => refetchRows()}>
                         <RefreshCw size={12} />
                       </button>
@@ -193,6 +206,9 @@ export default function FileManagerPage() {
                       rows={rows}
                       getRowKey={(row) => row.id}
                       rowStyle={(row) => editRow?.id === row.id ? { background: "rgba(251,191,36,.05)" } : undefined}
+                      selectable
+                      selectedKeys={selectedRowIds}
+                      onSelectionChange={setSelectedRowIds}
                       actionsLabel="Actions"
                       emptyMessage="No records"
                       renderActions={(row) => (

@@ -106,3 +106,36 @@ export const cvintelApi = {
   deleteHistoryItem: (id: number) => api.delete(`/api/cvintel/history/${id}`).then(r => r.data),
   deleteAllHistory: () => api.delete("/api/cvintel/history").then(r => r.data),
 };
+
+export const candidateTrackApi = {
+  meta: () => api.get("/api/candidatetrack/meta").then(r => r.data),
+
+  listClients: () => api.get("/api/candidatetrack/clients").then(r => r.data),
+  createClient: (data: any) => api.post("/api/candidatetrack/clients", data).then(r => r.data),
+  updateClient: (id: number, data: any) => api.put(`/api/candidatetrack/clients/${id}`, data).then(r => r.data),
+  deleteClient: (id: number) => api.delete(`/api/candidatetrack/clients/${id}`).then(r => r.data),
+  bulkDeleteClients: (ids: number[]) => api.delete("/api/candidatetrack/clients", { data: { ids } }).then(r => r.data),
+
+  listJDs: () => api.get("/api/candidatetrack/jds").then(r => r.data),
+  jdStats: () => api.get("/api/candidatetrack/jds/stats").then(r => r.data),
+  createJD: (data: any) => api.post("/api/candidatetrack/jds", data).then(r => r.data),
+  updateJD: (id: number, data: any) => api.put(`/api/candidatetrack/jds/${id}`, data).then(r => r.data),
+  deleteJD: (id: number) => api.delete(`/api/candidatetrack/jds/${id}`).then(r => r.data),
+  bulkDeleteJDs: (ids: number[]) => api.delete("/api/candidatetrack/jds", { data: { ids } }).then(r => r.data),
+
+  listVendors: () => api.get("/api/candidatetrack/vendors").then(r => r.data),
+  createVendor: (data: any) => api.post("/api/candidatetrack/vendors", data).then(r => r.data),
+  updateVendor: (id: number, data: any) => api.put(`/api/candidatetrack/vendors/${id}`, data).then(r => r.data),
+  deleteVendor: (id: number) => api.delete(`/api/candidatetrack/vendors/${id}`).then(r => r.data),
+  bulkDeleteVendors: (ids: number[]) => api.delete("/api/candidatetrack/vendors", { data: { ids } }).then(r => r.data),
+
+  listCandidates: () => api.get("/api/candidatetrack/candidates").then(r => r.data),
+  createCandidate: (form: FormData) =>
+    api.post("/api/candidatetrack/candidates", form, { headers: { "Content-Type": "multipart/form-data" } }).then(r => r.data),
+  bulkUploadCandidates: (form: FormData) =>
+    api.post("/api/candidatetrack/candidates/bulk-upload", form, { headers: { "Content-Type": "multipart/form-data" } }).then(r => r.data),
+  updateCandidate: (id: number, data: any) => api.put(`/api/candidatetrack/candidates/${id}`, data).then(r => r.data),
+  deleteCandidate: (id: number) => api.delete(`/api/candidatetrack/candidates/${id}`).then(r => r.data),
+  bulkDeleteCandidates: (ids: number[]) => api.delete("/api/candidatetrack/candidates", { data: { ids } }).then(r => r.data),
+  candidateStatusLog: (id: number) => api.get(`/api/candidatetrack/candidates/${id}/status-log`).then(r => r.data),
+};

@@ -48,16 +48,21 @@ export default function SettingsPage() {
   const flashMsg = (m: string) => { setKeyMsg(m); setTimeout(() => setKeyMsg(""), 3000); };
 
   const [savingService, setSavingService] = useState("");
+  const isAdmin = user?.role === "admin";
+  const SHAREABLE = ["groq", "ollama", "adzuna"];
+  const [globalToggle, setGlobalToggle] = useState<Record<string, boolean>>({});
+
   const saveKey = async (service: string, fields: Record<string, string>) => {
     const entries = Object.entries(fields).filter(([, v]) => v.trim() !== "");
     if (entries.length === 0) { flashMsg("Enter at least one value to save."); return; }
     setSavingService(service);
+    const isGlobal = isAdmin && SHAREABLE.includes(service) && !!globalToggle[service];
     try {
       for (const [key_name, key_value] of entries) {
-        await authApi.saveApiKey({ service, key_name, key_value });
+        await authApi.saveApiKey({ service, key_name, key_value, is_global: isGlobal });
       }
       qc.invalidateQueries({ queryKey: ["api-keys"] });
-      flashMsg("✅ " + service + " credentials saved successfully!");
+      flashMsg("✅ " + service + " credentials saved successfully!" + (isGlobal ? " (shared with all users)" : ""));
     } catch (e: any) {
       flashMsg("❌ Failed to save " + service + ": " + (e.response?.data?.detail || e.message));
     } finally {
@@ -87,6 +92,14 @@ export default function SettingsPage() {
       <input type={type} className="tiq-input" value={val}
         onChange={e => set(e.target.value)} placeholder={ph} />
     </div>
+  );
+
+  const globalCheckbox = (service: string) => isAdmin && (
+    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-muted)", margin: "8px 0" }}>
+      <input type="checkbox" checked={!!globalToggle[service]}
+        onChange={e => setGlobalToggle(g => ({ ...g, [service]: e.target.checked }))} />
+      Make this available to all users (admin only — Groq/Ollama/Adzuna can be shared platform-wide)
+    </label>
   );
 
   return (
@@ -170,6 +183,7 @@ export default function SettingsPage() {
               {inp("App ID", adzuna.app_id, v => setAdzuna(a => ({ ...a, app_id: v })), "text", "e.g. 638c0962")}
               {inp("App Key", adzuna.app_key, v => setAdzuna(a => ({ ...a, app_key: v })), "password", "e.g. 04681adc…")}
             </div>
+            {globalCheckbox("adzuna")}
             <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("adzuna", adzuna)} disabled={savingService === "adzuna"}>
               {savingService === "adzuna" ? "Saving…" : "Save Adzuna Keys"}
             </button>
@@ -182,6 +196,7 @@ export default function SettingsPage() {
               Free at <a href="https://console.groq.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>console.groq.com</a>. Enables AI resume matching and cover letter generation.
             </p>
             {inp("API Key", groq.api_key, v => setGroq({ api_key: v }), "password", "gsk_…")}
+            {globalCheckbox("groq")}
             <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("groq", groq)} disabled={savingService === "groq"}>
               {savingService === "groq" ? "Saving…" : "Save Groq Key"}
             </button>
@@ -214,6 +229,7 @@ export default function SettingsPage() {
               {inp("Base URL", ollama.base_url, v => setOllama(o => ({ ...o, base_url: v })), "text", "http://localhost:11434")}
               {inp("Model", ollama.model, v => setOllama(o => ({ ...o, model: v })), "text", "llama3")}
             </div>
+            {globalCheckbox("ollama")}
             <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("ollama", ollama)} disabled={savingService === "ollama"}>
               {savingService === "ollama" ? "Saving…" : "Save Ollama Settings"}
             </button>

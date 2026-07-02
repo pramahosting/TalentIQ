@@ -54,9 +54,13 @@ interface DataTableProps {
   getRowKey: (row: any, idx: number) => string | number;
   rowStyle?: (row: any) => React.CSSProperties | undefined;
   actionsLabel?: string;                      // e.g. "Actions" — omit to hide the actions column
+  actionsWidth?: number;                      // defaults to ACTIONS_COL_WIDTH; widen for busier action cells
   renderActions?: (row: any) => ReactNode;
   defaultColWidth?: number;
   emptyMessage?: string;
+  selectable?: boolean;                        // adds a checkbox column + "select all"
+  selectedKeys?: Array<string | number>;       // controlled selection
+  onSelectionChange?: (keys: Array<string | number>) => void;
 }
 
 /**
@@ -67,8 +71,9 @@ interface DataTableProps {
  * actually resized something.
  */
 export default function DataTable({
-  columns, rows, getRowKey, rowStyle, actionsLabel, renderActions,
+  columns, rows, getRowKey, rowStyle, actionsLabel, actionsWidth, renderActions,
   defaultColWidth = DEFAULT_COL_WIDTH, emptyMessage = "No records",
+  selectable = false, selectedKeys, onSelectionChange,
 }: DataTableProps) {
   const [widths, setWidths] = useState<Record<string, number>>({});
   const [resizingCol, setResizingCol] = useState<string | null>(null);
@@ -78,7 +83,18 @@ export default function DataTable({
   const [openFilter, setOpenFilter] = useState<{ col: string; x: number; y: number } | null>(null);
   const [filterSearch, setFilterSearch] = useState("");
   const [cellPopup, setCellPopup] = useState<{ x: number; y: number; text: string } | null>(null);
+  const [internalSelection, setInternalSelection] = useState<Array<string | number>>([]);
   const columnsKey = columns.join("|");
+
+  // Supports both controlled (selectedKeys + onSelectionChange from the
+  // parent, needed when it wants to drive a "Bulk Delete" button) and
+  // uncontrolled usage (falls back to its own state) so callers that don't
+  // care about the selection can still just pass selectable={true}.
+  const selection = selectedKeys ?? internalSelection;
+  const setSelection = (keys: Array<string | number>) => {
+    if (onSelectionChange) onSelectionChange(keys);
+    else setInternalSelection(keys);
+  };
 
   // Reset all interaction state whenever the column set itself changes
   // (i.e. the caller switched to a different table) — stale widths/sorts/
@@ -90,6 +106,9 @@ export default function DataTable({
     setSearch("");
     setOpenFilter(null);
     setCellPopup(null);
+    setInternalSelection([]);
+    if (onSelectionChange) onSelectionChange([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [columnsKey]);
 
   const resizingRef = useRef<{ col: string; startX: number; startWidth: number } | null>(null);
@@ -214,6 +233,22 @@ export default function DataTable({
   const fullCellText = (value: any) =>
     typeof value === "object" ? JSON.stringify(value, null, 2) : String(value);
 
+  const selectionSet = new Set(selection);
+  const visibleKeys = displayRows.map((row, i) => getRowKey(row, i));
+  const allVisibleSelected = visibleKeys.length > 0 && visibleKeys.every(k => selectionSet.has(k));
+  const someVisibleSelected = visibleKeys.some(k => selectionSet.has(k));
+
+  const toggleSelectAll = () => {
+    if (allVisibleSelected) {
+      setSelection(selection.filter(k => !visibleKeys.includes(k)));
+    } else {
+      setSelection(Array.from(new Set([...selection, ...visibleKeys])));
+    }
+  };
+  const toggleSelectOne = (key: string | number) => {
+    setSelection(selectionSet.has(key) ? selection.filter(k => k !== key) : [...selection, key]);
+  };
+
   return (
     <div>
       {/* Toolbar: global search on the left, contextual Reset Columns centered */}
@@ -252,13 +287,25 @@ export default function DataTable({
       <div style={{ overflowX: "auto" }}>
         <table className="tiq-table" style={{ tableLayout: "fixed", width: "100%", minWidth: columns.length * defaultColWidth }}>
           <colgroup>
+            {selectable && <col style={{ width: "38px" }} />}
             {columns.map(c => (
               <col key={c} style={{ width: (widths[c] || defaultColWidth) + "px" }} />
             ))}
-            {actionsLabel && <col style={{ width: ACTIONS_COL_WIDTH + "px" }} />}
+            {actionsLabel && <col style={{ width: (actionsWidth || ACTIONS_COL_WIDTH) + "px" }} />}
           </colgroup>
           <thead>
             <tr>
+              {selectable && (
+                <th style={{ padding: "8px 10px" }}>
+                  <input
+                    type="checkbox"
+                    checked={allVisibleSelected}
+                    ref={el => { if (el) el.indeterminate = !allVisibleSelected && someVisibleSelected; }}
+                    onChange={toggleSelectAll}
+                    title="Select all"
+                  />
+                </th>
+              )}
               {columns.map(c => {
                 const filterActive = colFilters[c] !== undefined;
                 return (
@@ -302,12 +349,19 @@ export default function DataTable({
           <tbody>
             {displayRows.length === 0 ? (
               <tr>
-                <td colSpan={columns.length + (actionsLabel ? 1 : 0)} style={{ textAlign: "center", padding: 32, color: "var(--text-muted)" }}>
+                <td colSpan={columns.length + (actionsLabel ? 1 : 0) + (selectable ? 1 : 0)} style={{ textAlign: "center", padding: 32, color: "var(--text-muted)" }}>
                   {emptyMessage}
                 </td>
               </tr>
-            ) : displayRows.map((row, i) => (
-              <tr key={getRowKey(row, i)} style={rowStyle?.(row)}>
+            ) : displayRows.map((row, i) => {
+              const rowKey = getRowKey(row, i);
+              return (
+              <tr key={rowKey} style={rowStyle?.(row)}>
+                {selectable && (
+                  <td style={{ padding: "8px 10px" }}>
+                    <input type="checkbox" checked={selectionSet.has(rowKey)} onChange={() => toggleSelectOne(rowKey)} />
+                  </td>
+                )}
                 {columns.map(c => {
                   const truncated = isCellTruncated(row[c]);
                   return (
@@ -329,7 +383,8 @@ export default function DataTable({
                 })}
                 {actionsLabel && <td>{renderActions?.(row)}</td>}
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

@@ -50,6 +50,7 @@ export default function PublicInterviewPage() {
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const mediaRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
   const engineRef = useRef<any>(null);
   const isRecordingRef = useRef(false);
 
@@ -97,6 +98,15 @@ export default function PublicInterviewPage() {
       });
       if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
       setStarted(true);
+      // Record the WHOLE interview as a single continuous MediaRecorder
+      // session — see equivalent comment in JobLensPage's VideoInterviewModal.
+      try {
+        const mr = new MediaRecorder(stream, { mimeType: "video/webm" });
+        mediaRef.current = mr;
+        chunksRef.current = [];
+        mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+        mr.start();
+      } catch { /* MediaRecorder unsupported — emotion AI + timer still work */ }
       await initMorphcast();
       speakQuestion(questions[0] || "");
     } catch {
@@ -196,13 +206,8 @@ export default function PublicInterviewPage() {
   };
 
   const startRecording = () => {
-    const stream = videoRef.current?.srcObject as MediaStream;
-    if (!stream) return;
-    try {
-      const mr = new MediaRecorder(stream, { mimeType: "video/webm" });
-      mediaRef.current = mr;
-      mr.start();
-    } catch { /* MediaRecorder unsupported — emotion AI + timer still work */ }
+    // Actual video capture already started once in startCamera() and runs
+    // continuously — this just drives the per-question UI.
     setRecording(true);
     setTimeLeft(ANSWER_SECONDS);
   };
@@ -217,7 +222,6 @@ export default function PublicInterviewPage() {
 
   const nextQuestion = () => {
     if (timerTickRef.current) { clearTimeout(timerTickRef.current); timerTickRef.current = null; }
-    mediaRef.current?.stop();
     setRecording(false);
     if (qIdx < questions.length - 1) {
       setTimeout(() => {
@@ -231,10 +235,22 @@ export default function PublicInterviewPage() {
 
   const finishInterview = async () => {
     if (timerTickRef.current) { clearTimeout(timerTickRef.current); timerTickRef.current = null; }
-    mediaRef.current?.stop();
     setRecording(false);
     speechSynthesis.cancel();
     try { await engineRef.current?.stop?.(); await engineRef.current?.destroy?.(); } catch {}
+
+    const videoBlob: Blob | null = await new Promise(resolve => {
+      const mr = mediaRef.current;
+      if (!mr || mr.state === "inactive") {
+        resolve(chunksRef.current.length ? new Blob(chunksRef.current, { type: "video/webm" }) : null);
+        return;
+      }
+      mr.onstop = () => {
+        resolve(chunksRef.current.length ? new Blob(chunksRef.current, { type: "video/webm" }) : null);
+      };
+      mr.stop();
+    });
+
     const tracks = (videoRef.current?.srcObject as MediaStream)?.getTracks?.() || [];
     tracks.forEach(t => t.stop());
 
@@ -245,6 +261,17 @@ export default function PublicInterviewPage() {
     try {
       await publicApi.post(`/api/joblens/public/interview/${token}/result`, emotions);
     } catch { /* still show the thank-you screen even if save failed */ }
+
+    if (videoBlob) {
+      try {
+        const form = new FormData();
+        form.append("file", videoBlob, "interview.webm");
+        await publicApi.post(`/api/joblens/public/interview/${token}/video`, form, {
+          headers: { "Content-Type": "multipart/form-data" },
+        });
+      } catch { /* emotion results already saved; video upload failure is non-fatal */ }
+    }
+
     setFinished(true);
   };
 

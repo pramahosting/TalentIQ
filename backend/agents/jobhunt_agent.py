@@ -5,6 +5,7 @@ All results persisted to PostgreSQL.
 """
 
 import re
+import json
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 
@@ -226,59 +227,160 @@ def extract_requirements_from_description(description: str) -> List[str]:
     return requirements[:15]
 
 
-def calculate_match(resume_text: str, job: Dict, groq_api_key: Optional[str] = None) -> Dict:
-    """Calculate ATS score and generate insights for a single job"""
-    requirements = extract_requirements_from_description(job.get("description", ""))
-    text_lower = resume_text.lower()
+# ══════════════════════════════════════════════════════════════════════════════
+# ATS MATCHING — structured extraction + deterministic weighted scoring.
+#
+# The old version asked the LLM to reply in an ad-hoc "SCORE:XX
+# STRENGTHS:s1|s2|s3" text format and regex-parsed it — fragile and prone to
+# silently wrong scores whenever the model's formatting drifted even
+# slightly. This mirrors the same structured approach used in CVAnalysis:
+# extract facts as JSON, then score with plain deterministic Python math.
+#
+# Since a resume is matched against MANY jobs in one batch, the candidate's
+# profile is extracted ONCE per batch (see extract_candidate_profile below)
+# and reused — only the per-job requirement extraction repeats per job.
+# ══════════════════════════════════════════════════════════════════════════════
 
-    # Simple keyword matching
-    matched = []
-    missed = []
-    for req in requirements:
-        words = re.findall(r"\b\w{3,}\b", req.lower())
-        hits = sum(1 for w in words if w in text_lower)
-        if hits >= max(1, len(words) // 2):
-            matched.append(req)
-        else:
-            missed.append(req)
+_JOBHUNT_SKILL_BANK = [
+    "python","javascript","typescript","react","node","sql","postgresql","mongodb",
+    "aws","azure","gcp","docker","kubernetes","git","agile","rest","api","graphql",
+    "machine learning","ai","artificial intelligence","data science","excel","power bi","tableau","salesforce",
+    "django","flask","java","c#","c++","go","spark","kafka","airflow","dbt",
+    "snowflake","databricks","stakeholder management","cloud architecture",
+    "data mesh","data fabric","data vault","lakehouse","enterprise data warehouse","edw",
+    "data governance","master data management","collibra","alation","teradata","hadoop",
+    "synapse","azure data factory","enterprise architecture","solution architecture","togaf",
+    "basel","banking","bfsi","insurance","risk management","regulatory compliance",
+    "microservices","devops","ci/cd","accounting","tax","audit","payroll",
+    "financial reporting","budgeting","forecasting","reconciliation",
+    "leadership","communication","problem solving","project management","scrum",
+]
 
-    ats_score = round((len(matched) / max(len(requirements), 1)) * 100, 1)
 
-    # Use LLM if API key provided and library available
+def _normalize_skill(s: str) -> str:
+    return re.sub(r"\s+", " ", s.strip().lower())
+
+
+async def extract_candidate_profile(resume_text: str, groq_api_key: Optional[str] = None) -> Dict:
+    """Extract a structured candidate profile ONCE per resume — reused across
+    every job in a match batch rather than re-extracted per job."""
     if groq_api_key and _GROQ_AVAILABLE and ChatGroq and len(resume_text) > 100:
         try:
-            llm = ChatGroq(api_key=groq_api_key, model="llama3-70b-8192", temperature=0.2)
-            prompt = (
-                f"Resume (excerpt): {resume_text[:2000]}\n\n"
-                f"Job Title: {job.get('title')}\n"
-                f"Requirements:\n" + "\n".join(f"- {r}" for r in requirements[:10]) +
-                "\n\nProvide: 1) ATS score 0-100 2) Top 3 strengths 3) Top 2 gaps. "
-                "Format as: SCORE:XX STRENGTHS:s1|s2|s3 GAPS:g1|g2"
-            )
-            response = llm.invoke(prompt).content
-            score_m = re.search(r"SCORE:(\d+)", response)
-            str_m = re.search(r"STRENGTHS:(.+?)(?:GAPS:|$)", response)
-            gap_m = re.search(r"GAPS:(.+)", response)
-            if score_m:
-                ats_score = float(score_m.group(1))
-            if str_m:
-                matched = [s.strip() for s in str_m.group(1).split("|") if s.strip()]
-            if gap_m:
-                missed = [g.strip() for g in gap_m.group(1).split("|") if g.strip()]
+            from langchain.schema import HumanMessage
+            llm = ChatGroq(api_key=groq_api_key, model="llama3-70b-8192", temperature=0.15)
+            prompt = f"""Extract this candidate's profile from their resume. Be factual — do
+not credit skills or experience the resume doesn't support.
+
+RESUME:
+\"\"\"{resume_text[:4000]}\"\"\"
+
+Return ONLY valid JSON, no markdown, no commentary:
+{{
+  "hard_skills": ["<skill>", ...],
+  "years_experience": <integer, best estimate>,
+  "education": "<highest qualification found, or empty string>"
+}}"""
+            resp = llm.invoke([HumanMessage(content=prompt)])
+            raw = resp.content.strip()
+            raw = re.sub(r"```(?:json)?|```", "", raw).strip()
+            data = json.loads(raw)
+            if data.get("hard_skills") is not None:
+                data["_ai_powered"] = True
+                return data
         except Exception:
-            pass  # Fall back to keyword matching
+            pass
+
+    text_lower = resume_text.lower()
+    found = [s for s in _JOBHUNT_SKILL_BANK if s in text_lower]
+    years_m = re.findall(r"(\d{1,2})\+?\s*(?:years?|yrs?)\s*(?:of\s+)?experience", text_lower)
+    years = max((int(y) for y in years_m), default=0)
+    edu_m = re.search(r"(bachelor'?s?|master'?s?|phd|degree|diploma)[^.\n]{0,80}", text_lower)
+    return {
+        "hard_skills": found,
+        "years_experience": years,
+        "education": edu_m.group().strip().capitalize() if edu_m else "",
+        "_ai_powered": False,
+    }
+
+
+async def _extract_job_requirements(job: Dict, groq_api_key: Optional[str] = None) -> Dict:
+    description = job.get("description", "") or ""
+    if groq_api_key and _GROQ_AVAILABLE and ChatGroq and len(description) > 60:
+        try:
+            from langchain.schema import HumanMessage
+            llm = ChatGroq(api_key=groq_api_key, model="llama3-70b-8192", temperature=0.1)
+            prompt = f"""Extract requirements from this job description. Don't invent
+requirements that aren't stated or clearly implied.
+
+JOB TITLE: {job.get('title', '')}
+DESCRIPTION:
+\"\"\"{description[:2500]}\"\"\"
+
+Return ONLY valid JSON, no markdown, no commentary:
+{{
+  "required_hard_skills": ["<skill>", ...],
+  "min_years_experience": <integer, 0 if not stated>,
+  "education_requirement": "<short phrase, or empty string>"
+}}"""
+            resp = llm.invoke([HumanMessage(content=prompt)])
+            raw = resp.content.strip()
+            raw = re.sub(r"```(?:json)?|```", "", raw).strip()
+            data = json.loads(raw)
+            if data.get("required_hard_skills"):
+                return data
+        except Exception:
+            pass
+
+    desc_lower = description.lower()
+    found = [s for s in _JOBHUNT_SKILL_BANK if s in desc_lower]
+    years_m = re.search(r"(\d{1,2})\+?\s*(?:years?|yrs?)\s*(?:of\s+)?experience", desc_lower)
+    edu_m = re.search(r"(bachelor'?s?|master'?s?|phd|degree|diploma)[^.\n]{0,80}", desc_lower)
+    return {
+        "required_hard_skills": found or [r for r in extract_requirements_from_description(description)][:10],
+        "min_years_experience": int(years_m.group(1)) if years_m else 0,
+        "education_requirement": edu_m.group().strip().capitalize() if edu_m else "",
+    }
+
+
+async def calculate_match(
+    resume_text: str, job: Dict, groq_api_key: Optional[str] = None,
+    candidate_profile: Optional[Dict] = None,
+) -> Dict:
+    """Calculate ATS score and generate insights for a single job.
+    Pass a pre-extracted `candidate_profile` (from extract_candidate_profile)
+    when matching one resume against many jobs, to avoid re-extracting the
+    same resume on every call."""
+    if candidate_profile is None:
+        candidate_profile = await extract_candidate_profile(resume_text, groq_api_key)
+
+    requirements = await _extract_job_requirements(job, groq_api_key)
+    text_lower = resume_text.lower()
+    candidate_skills = {_normalize_skill(s) for s in candidate_profile.get("hard_skills", [])}
+
+    required = [_normalize_skill(s) for s in requirements.get("required_hard_skills", []) if s]
+    matched = [s for s in required if any(s in cs or cs in s for cs in candidate_skills) or s in text_lower]
+    missed = [s for s in required if s not in matched]
+
+    skills_pct = round(len(matched) / len(required) * 100) if required else 65
+
+    min_years = requirements.get("min_years_experience") or 0
+    cand_years = candidate_profile.get("years_experience") or 0
+    experience_pct = 85 if min_years <= 0 else max(20, min(100, round(cand_years / min_years * 100)))
+
+    ats_score = round(skills_pct * 0.65 + experience_pct * 0.25 + 75 * 0.10, 1)
+    ats_score = max(10, min(98, ats_score))
 
     summary = [
         f"ATS match score: {ats_score}%",
-        f"Matched {len(matched)} of {len(requirements)} requirements.",
+        f"Matched {len(matched)} of {len(required)} extracted requirements.",
     ]
     if missed:
         summary.append(f"Gaps: {', '.join(missed[:3])}")
 
     return {
-        "ats_score": min(ats_score, 100),
-        "strengths": matched[:8],
-        "improvements": missed[:5],
+        "ats_score": ats_score,
+        "strengths": [s.title() for s in matched][:8],
+        "improvements": [s.title() for s in missed][:5],
         "summary": summary,
     }
 

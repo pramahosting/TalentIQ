@@ -5,8 +5,27 @@ import { useLatestMutation } from "../hooks/useLatestMutation";
 import {
   Users, Upload, FileText, Play, Download, ChevronDown, ChevronUp,
   CheckCircle, Clock, XCircle, Star, Video, RefreshCw, Sparkles, BarChart2,
-  Trash2, Mail } from "lucide-react";
+  Trash2, Mail, Building2 } from "lucide-react";
 import { api } from "../lib/api";
+import JDManagementTab from "../components/candidatetrack/JDManagementTab";
+import VendorManagementTab from "../components/candidatetrack/VendorManagementTab";
+import CandidateTrackingTab from "../components/candidatetrack/CandidateTrackingTab";
+import ClientManagementTab from "../components/candidatetrack/ClientManagementTab";
+
+// Fetches a protected file (video/resume) via the authenticated axios
+// client — a plain <a href> wouldn't carry the Bearer token, since that's
+// sent as a header, not a cookie — then opens it in a new tab as a blob URL.
+async function openBlobInNewTab(url: string, fallbackType?: string) {
+  try {
+    const res = await api.get(url, { responseType: "blob" });
+    const blob = fallbackType ? new Blob([res.data], { type: fallbackType }) : res.data;
+    const objectUrl = URL.createObjectURL(blob);
+    window.open(objectUrl, "_blank");
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+  } catch {
+    alert("Could not load the file.");
+  }
+}
 import HistoryDropdown from "../components/HistoryDropdown";
 
 // ─── API ───────────────────────────────────────────────────────────────────
@@ -31,6 +50,19 @@ const jobLensApi = {
     api.get(`/api/joblens/morphcast-key`).then(r => r.data),
   markContacted: (cid: number) =>
     api.post(`/api/joblens/candidates/${cid}/mark-contacted`).then(r => r.data),
+  uploadVideo: (cid: number, blob: Blob) => {
+    const form = new FormData();
+    form.append("file", blob, "interview.webm");
+    return api.post(`/api/joblens/candidates/${cid}/video`, form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    }).then(r => r.data);
+  },
+  reanalyzeVideo: (cid: number) =>
+    api.post(`/api/joblens/candidates/${cid}/reanalyze-video`).then(r => r.data),
+  jdOptions: () =>
+    api.get(`/api/joblens/jd-options`).then(r => r.data),
+  vendorCandidates: (jdId: number) =>
+    api.get(`/api/joblens/vendor-candidates`, { params: { jd_id: jdId } }).then(r => r.data),
 };
 
 // ─── HELPERS ───────────────────────────────────────────────────────────────
@@ -138,7 +170,7 @@ function VideoInterviewModal({
   candidate, questions, sessionId, onClose, onDone
 }: {
   candidate: any; questions: string[]; sessionId: number;
-  onClose: () => void; onDone: (emotions: any) => void;
+  onClose: () => void; onDone: (emotions: any, videoBlob: Blob | null) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const mediaRef = useRef<MediaRecorder | null>(null);
@@ -179,6 +211,17 @@ function VideoInterviewModal({
       });
       if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
       setStarted(true);
+      // Record the WHOLE interview as a single continuous MediaRecorder
+      // session (started once, stopped once) — starting/stopping a new
+      // recorder per-question would produce several independent WebM
+      // fragments that can't simply be concatenated into one playable file.
+      try {
+        const mr = new MediaRecorder(stream, { mimeType: "video/webm" });
+        mediaRef.current = mr;
+        chunksRef.current = [];
+        mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+        mr.start();
+      } catch { /* MediaRecorder unsupported — emotion AI + timer still work */ }
       await initMorphcast();
       speakQuestion(questions[0] || "");
     } catch {
@@ -279,15 +322,9 @@ function VideoInterviewModal({
   };
 
   const startRecording = () => {
-    const stream = videoRef.current?.srcObject as MediaStream;
-    if (!stream) return;
-    try {
-      const mr = new MediaRecorder(stream, { mimeType: "video/webm" });
-      mediaRef.current = mr;
-      chunksRef.current = [];
-      mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
-      mr.start();
-    } catch { /* MediaRecorder unsupported — emotion AI + timer still work */ }
+    // Actual video capture already started once in startCamera() and runs
+    // continuously for the whole interview — this just drives the
+    // per-question UI (timer, REC indicator).
     setRecording(true);
     setTimeLeft(ANSWER_SECONDS);
   };
@@ -303,7 +340,6 @@ function VideoInterviewModal({
 
   const nextQuestion = () => {
     if (timerTickRef.current) { clearTimeout(timerTickRef.current); timerTickRef.current = null; }
-    mediaRef.current?.stop();
     setRecording(false);
     if (qIdx < questions.length - 1) {
       setTimeout(() => {
@@ -317,17 +353,31 @@ function VideoInterviewModal({
 
   const finishInterview = async () => {
     if (timerTickRef.current) { clearTimeout(timerTickRef.current); timerTickRef.current = null; }
-    mediaRef.current?.stop();
     setRecording(false);
     speechSynthesis.cancel();
     try { await engineRef.current?.stop?.(); await engineRef.current?.destroy?.(); } catch {}
+
+    // Stop the single continuous recorder and wait for it to fully flush
+    // its last chunk (fires asynchronously) before building the final blob.
+    const videoBlob: Blob | null = await new Promise(resolve => {
+      const mr = mediaRef.current;
+      if (!mr || mr.state === "inactive") {
+        resolve(chunksRef.current.length ? new Blob(chunksRef.current, { type: "video/webm" }) : null);
+        return;
+      }
+      mr.onstop = () => {
+        resolve(chunksRef.current.length ? new Blob(chunksRef.current, { type: "video/webm" }) : null);
+      };
+      mr.stop();
+    });
+
     const tracks = (videoRef.current?.srcObject as MediaStream)?.getTracks?.() || [];
     tracks.forEach(t => t.stop());
 
     const emotions = samples > 0
       ? { ...avgAgg, dominant }
       : { happy: 0, neutral: 100, sad: 0, angry: 0, disgust: 0, fear: 0, surprise: 0, dominant: "Neutral" };
-    onDone(emotions);
+    onDone(emotions, videoBlob);
   };
 
   const currentQ = questions[qIdx] || "Loading...";
@@ -491,6 +541,7 @@ function CandidateRow({
   const [inviteToken, setInviteToken] = useState<string | null>(c.interview_token || null);
   const [preparingInvite, setPreparingInvite] = useState(false);
   const [popover, setPopover] = useState<PopoverState>(null);
+  const [showTranscript, setShowTranscript] = useState(false);
 
   // Local, instantly-updated shortlist state — decoupled from the parent
   // session refetch so the checkbox never waits on a network round trip.
@@ -505,6 +556,11 @@ function CandidateRow({
     onSuccess: () => { onRefresh(); },
   });
 
+  const reanalyzeMut = useMutation({
+    mutationFn: () => jobLensApi.reanalyzeVideo(c.id),
+    onSuccess: () => { onRefresh(); },
+  });
+
   const genQuestions = async () => {
     setGenLoading(true);
     try {
@@ -515,8 +571,11 @@ function CandidateRow({
     }
   };
 
-  const handleInterviewDone = async (emotions: any) => {
+  const handleInterviewDone = async (emotions: any, videoBlob: Blob | null) => {
     await jobLensApi.saveInterviewResult(c.id, emotions);
+    if (videoBlob) {
+      try { await jobLensApi.uploadVideo(c.id, videoBlob); } catch { /* score/result already saved; video upload failure is non-fatal */ }
+    }
     setInterviewOpen(false);
     onRefresh();
   };
@@ -561,6 +620,7 @@ function CandidateRow({
         </td>
         <td style={{ fontSize: 12 }}>{c.email}</td>
         <td style={{ fontSize: 12 }}>{c.phone}</td>
+        <td style={{ fontSize: 12 }}>{c.source_vendor_name || "—"}</td>
 
         {/* Resume Summary — 2 bullets visible, click for the full 10-statement list */}
         <td style={{ fontSize: 11, minWidth: 200 }}>
@@ -631,7 +691,7 @@ function CandidateRow({
 
       {expanded && (
         <tr>
-          <td colSpan={10} style={{ padding: "14px 20px", background: "var(--bg-secondary)" }}>
+          <td colSpan={11} style={{ padding: "14px 20px", background: "var(--bg-secondary)" }}>
             {c.summary && (
               <div style={{ marginBottom: 16, paddingBottom: 14, borderBottom: "1px solid var(--border)" }}>
                 <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 6 }}>Profile Summary</div>
@@ -648,6 +708,20 @@ function CandidateRow({
                   <Video size={12} /> {c.video_status === "Completed" ? "Re-run" : "Start"}
                 </button>
                 <div style={{ marginTop: 6 }}><StatusBadge status={c.video_status} /></div>
+                <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 4 }}>
+                  {c.has_video && (
+                    <button type="button" onClick={() => openBlobInNewTab(`/api/joblens/candidates/${c.id}/video`, "video/webm")}
+                      style={{ background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer", fontSize: 11, color: "var(--teal-500)" }}>
+                      ▶ View recorded video
+                    </button>
+                  )}
+                  {c.has_resume_file && (
+                    <button type="button" onClick={() => openBlobInNewTab(`/api/joblens/candidates/${c.id}/resume-file`)}
+                      style={{ background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer", fontSize: 11, color: "var(--teal-500)" }}>
+                      📄 View original resume
+                    </button>
+                  )}
+                </div>
               </div>
 
               {/* Video Review */}
@@ -686,6 +760,84 @@ function CandidateRow({
                 </label>
               </div>
             </div>
+
+            {/* AI Video Interview Analysis — auto-generated after the video uploads */}
+            {c.has_video && (
+              <div style={{ marginBottom: 16, paddingBottom: 14, borderBottom: "1px solid var(--border)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)" }}>
+                    AI Video Interview Analysis
+                  </div>
+                  <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ fontSize: 10 }}
+                    disabled={c.video_analysis_status === "Pending" || c.video_analysis_status === "Processing" || reanalyzeMut.isPending}
+                    onClick={() => reanalyzeMut.mutate()}>
+                    <RefreshCw size={10} /> {reanalyzeMut.isPending ? "Queuing…" : "Re-run Video Analysis"}
+                  </button>
+                </div>
+                {(c.video_analysis_status === "Pending" || c.video_analysis_status === "Processing") && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--text-muted)" }}>
+                    <span className="tiq-spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
+                    {c.video_analysis_status === "Processing" ? "Transcribing and analysing…" : "Queued for analysis…"}
+                  </div>
+                )}
+                {c.video_analysis_status === "Failed" && (
+                  <div style={{ fontSize: 12, color: "var(--rose-500)" }}>
+                    Analysis failed{c.video_analysis?.error ? `: ${c.video_analysis.error}` : "."}
+                  </div>
+                )}
+                {c.video_analysis_status === "Completed" && c.video_analysis && (
+                  <div>
+                    <div style={{ display: "flex", gap: 16, marginBottom: 10, flexWrap: "wrap" }}>
+                      {[
+                        ["Overall", c.video_analysis.overall_score, "var(--violet-500)"],
+                        ["Communication", c.video_analysis.communication_score, "#0d9488"],
+                        ["Relevance", c.video_analysis.relevance_score, "#0d9488"],
+                        ["Confidence", c.video_analysis.confidence_score, "#0d9488"],
+                      ].map(([label, val, color]: any) => (
+                        <div key={label} style={{ textAlign: "center" }}>
+                          <div style={{ fontSize: 18, fontWeight: 800, color }}>{val ?? "—"}</div>
+                          <div style={{ fontSize: 10, color: "var(--text-muted)" }}>{label}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {c.video_analysis.summary && (
+                      <p style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 10, lineHeight: 1.6 }}>
+                        {c.video_analysis.summary}
+                      </p>
+                    )}
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                      {c.video_analysis.strengths?.length > 0 && (
+                        <div>
+                          <div style={{ fontSize: 10, fontWeight: 700, color: "var(--teal-500)", marginBottom: 4 }}>STRENGTHS</div>
+                          <ul style={{ margin: 0, paddingLeft: 14, fontSize: 12 }}>
+                            {c.video_analysis.strengths.map((s: string, i: number) => <li key={i}>{s}</li>)}
+                          </ul>
+                        </div>
+                      )}
+                      {c.video_analysis.concerns?.length > 0 && (
+                        <div>
+                          <div style={{ fontSize: 10, fontWeight: 700, color: "var(--rose-500)", marginBottom: 4 }}>CONCERNS</div>
+                          <ul style={{ margin: 0, paddingLeft: 14, fontSize: 12 }}>
+                            {c.video_analysis.concerns.map((s: string, i: number) => <li key={i}>{s}</li>)}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                    {c.video_transcript && (
+                      <button type="button" onClick={() => setShowTranscript(t => !t)}
+                        style={{ marginTop: 10, background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 11, color: "var(--teal-500)" }}>
+                        {showTranscript ? "Hide full transcript ▲" : "View full transcript ▼"}
+                      </button>
+                    )}
+                    {showTranscript && c.video_transcript && (
+                      <div style={{ marginTop: 8, padding: 10, background: "var(--bg-secondary)", borderRadius: 8, fontSize: 12, lineHeight: 1.6, maxHeight: 240, overflowY: "auto", whiteSpace: "pre-wrap" }}>
+                        {c.video_transcript}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 6 }}>
@@ -772,10 +924,29 @@ export default function JobLensPage() {
   const [jdText, setJdText] = useState("");
   const [jdFile, setJdFile] = useState<File | null>(null);
   const [cvFiles, setCvFiles] = useState<FileList | null>(null);
+
+  // New Analysis: optional sourcing from JD Management + Vendor Management,
+  // additive to the original paste/upload flow (which stays default/unchanged).
+  const [jdSource, setJdSource] = useState<"upload" | "jdManagement">("upload");
+  const [selectedJdRecordId, setSelectedJdRecordId] = useState<number | "">("");
+  const [cvSource, setCvSource] = useState<"upload" | "vendor">("upload");
+  const [selectedVendorCandidateIds, setSelectedVendorCandidateIds] = useState<number[]>([]);
+
+  const { data: jdOptions = [] } = useQuery({
+    queryKey: ["joblens-jd-options"],
+    queryFn: jobLensApi.jdOptions,
+    enabled: jdSource === "jdManagement",
+  });
+  const { data: vendorCandidateOptions = [] } = useQuery({
+    queryKey: ["joblens-vendor-candidates", selectedJdRecordId],
+    queryFn: () => jobLensApi.vendorCandidates(selectedJdRecordId as number),
+    enabled: cvSource === "vendor" && !!selectedJdRecordId,
+  });
   const [lowT, setLowT] = useState(40);
   const [highT, setHighT] = useState(70);
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
-  const [tab, setTab] = useState<"new"|"history">("new");
+  const [tab, setTab] = useState<"new"|"history"|"management">("new");
+  const [managementView, setManagementView] = useState<"clients"|"jds"|"vendors"|"tracking">("clients");
   const jdFileRef = useRef<HTMLInputElement>(null);
   const cvFileRef = useRef<HTMLInputElement>(null);
   const theadRef = useRef<HTMLTableSectionElement>(null);
@@ -797,17 +968,29 @@ export default function JobLensPage() {
     queryKey: ["joblens-session", activeSessionId],
     queryFn: () => jobLensApi.session(activeSessionId!),
     enabled: !!activeSessionId,
+    // Automatic video analysis runs in the background after upload — poll
+    // while any candidate is still Pending/Processing so the result shows
+    // up without the user needing to manually hit Refresh.
+    refetchInterval: (query) => {
+      const candidates = (query.state.data as any)?.candidates || [];
+      const stillWorking = candidates.some((c: any) =>
+        c.video_analysis_status === "Pending" || c.video_analysis_status === "Processing"
+      );
+      return stillWorking ? 5000 : false;
+    },
   });
 
   const runMut = useMutation({
     mutationKey: ["joblens-run"],
     mutationFn: () => {
       const form = new FormData();
-      form.append("jd_text", jdText);
+      form.append("jd_text", jdSource === "upload" ? jdText : "");
       form.append("low_threshold", String(lowT));
       form.append("high_threshold", String(highT));
-      if (jdFile) form.append("jd_file", jdFile);
-      if (cvFiles) for (let i = 0; i < cvFiles.length; i++) form.append("cv_files", cvFiles[i]);
+      if (jdSource === "upload" && jdFile) form.append("jd_file", jdFile);
+      if (jdSource === "jdManagement" && selectedJdRecordId) form.append("jd_record_id", String(selectedJdRecordId));
+      if (cvSource === "upload" && cvFiles) for (let i = 0; i < cvFiles.length; i++) form.append("cv_files", cvFiles[i]);
+      if (cvSource === "vendor" && selectedVendorCandidateIds.length) form.append("source_candidate_ids", selectedVendorCandidateIds.join(","));
       return jobLensApi.run(form);
     },
     onSuccess: (data) => {
@@ -861,33 +1044,54 @@ export default function JobLensPage() {
       </div>
 
       {/* Tabs row — session dropdown sits inline, right next to the Results tab */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-        <div className="tiq-tabs">
-          <button className={`tiq-tab${tab === "new" ? " active" : ""}`} onClick={() => setTab("new")}>
-            <Play size={12} style={{ display: "inline", marginRight: 6 }} /> New Analysis
-          </button>
-          <button className={`tiq-tab${tab === "history" ? " active" : ""}`} onClick={() => setTab("history")}>
-            <BarChart2 size={12} style={{ display: "inline", marginRight: 6 }} /> Results
-            {sessions.length > 0 && <span className="tiq-badge tiq-badge-slate" style={{ marginLeft: 8, fontSize: 10 }}>{sessions.length}</span>}
-          </button>
-        </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+          <div className="tiq-tabs">
+            <button className={`tiq-tab${tab === "management" ? " active" : ""}`} onClick={() => setTab("management")}>
+              <Building2 size={12} style={{ display: "inline", marginRight: 6 }} /> Management
+            </button>
+            <button className={`tiq-tab${tab === "new" ? " active" : ""}`} onClick={() => setTab("new")}>
+              <Play size={12} style={{ display: "inline", marginRight: 6 }} /> New Analysis
+            </button>
+            <button className={`tiq-tab${tab === "history" ? " active" : ""}`} onClick={() => setTab("history")}>
+              <BarChart2 size={12} style={{ display: "inline", marginRight: 6 }} /> Results
+              {sessions.length > 0 && <span className="tiq-badge tiq-badge-slate" style={{ marginLeft: 8, fontSize: 10 }}>{sessions.length}</span>}
+            </button>
+          </div>
 
-        {tab === "history" && sessions.length > 0 && (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, maxWidth: 380, width: "100%" }}>
+          {tab === "history" && sessions.length > 0 && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, maxWidth: 380, width: "100%" }}>
             <HistoryDropdown
               value={activeSessionId}
               onChange={id => setActiveSessionId(id as number | null)}
               options={sessions.map((s: any) => ({
                 id: s.id,
-                label: `Session #${s.id} · ${s.cv_count} CVs · ${new Date(s.created_at).toLocaleDateString()}`,
+                label: `Session #${s.sequence_number || s.id} · ${s.cv_count} CVs · ${new Date(s.created_at).toLocaleDateString()}`,
               }))}
               onDelete={id => deleteMutation.mutate(id as number)}
               placeholder="Select a session…"
               confirmDeleteMessage="Delete this session?"
             />
           </div>
+          )}
+        </div>
+
+        {tab === "management" && (
+          <select className="tiq-input" style={{ maxWidth: 260 }}
+            value={managementView}
+            onChange={e => setManagementView(e.target.value as typeof managementView)}>
+            <option value="clients">Client Management</option>
+            <option value="jds">JD Management</option>
+            <option value="vendors">Vendor Management</option>
+            <option value="tracking">Candidate Tracking</option>
+          </select>
         )}
       </div>
+
+      {tab === "management" && managementView === "clients" && <ClientManagementTab />}
+      {tab === "management" && managementView === "jds" && <JDManagementTab />}
+      {tab === "management" && managementView === "vendors" && <VendorManagementTab />}
+      {tab === "management" && managementView === "tracking" && <CandidateTrackingTab />}
 
       {tab === "new" && (
         <div style={{ maxWidth: 900 }}>
@@ -897,25 +1101,56 @@ export default function JobLensPage() {
               <div className="tiq-card-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <FileText size={15} color="var(--violet-500)" /> Job Description
               </div>
-              <textarea
-                value={jdText}
-                onChange={e => setJdText(e.target.value)}
-                placeholder="Paste job description here..."
-                style={{ width: "100%", minHeight: 200, padding: 10, fontSize: 12,
-                  fontFamily: "monospace", border: "1.5px solid var(--border)",
-                  borderRadius: 8, resize: "vertical", outline: "none",
-                  background: "var(--bg-secondary)", color: "var(--text-primary)" }}
-              />
-              <div style={{ marginTop: 10, fontSize: 12, color: "var(--text-muted)" }}>Or upload JD file:</div>
-              <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-                <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
-                  onClick={() => jdFileRef.current?.click()}>
-                  <Upload size={12} /> Upload JD
-                </button>
-                {jdFile && <span style={{ fontSize: 12, color: "var(--teal-500)", alignSelf: "center" }}>✓ {jdFile.name}</span>}
+              <div style={{ display: "flex", gap: 14, marginBottom: 12, fontSize: 12 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
+                  <input type="radio" checked={jdSource === "upload"} onChange={() => setJdSource("upload")} />
+                  Paste / Upload
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
+                  <input type="radio" checked={jdSource === "jdManagement"} onChange={() => setJdSource("jdManagement")} />
+                  From JD Management
+                </label>
               </div>
-              <input ref={jdFileRef} type="file" accept=".txt,.pdf,.doc,.docx" style={{ display: "none" }}
-                onChange={e => setJdFile(e.target.files?.[0] || null)} />
+
+              {jdSource === "jdManagement" ? (
+                <div className="tiq-form-group">
+                  <label className="tiq-label">Select JD</label>
+                  <select className="tiq-input" value={selectedJdRecordId}
+                    onChange={e => { setSelectedJdRecordId(e.target.value ? Number(e.target.value) : ""); setSelectedVendorCandidateIds([]); }}>
+                    <option value="">Select a JD…</option>
+                    {jdOptions.map((j: any) => (
+                      <option key={j.id} value={j.id}>{j.jd_title} — {j.client_name || "No client"}</option>
+                    ))}
+                  </select>
+                  {jdOptions.length === 0 && (
+                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
+                      No JDs yet — create one in the JD Management tab first.
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <>
+                  <textarea
+                    value={jdText}
+                    onChange={e => setJdText(e.target.value)}
+                    placeholder="Paste job description here..."
+                    style={{ width: "100%", minHeight: 200, padding: 10, fontSize: 12,
+                      fontFamily: "monospace", border: "1.5px solid var(--border)",
+                      borderRadius: 8, resize: "vertical", outline: "none",
+                      background: "var(--bg-secondary)", color: "var(--text-primary)" }}
+                  />
+                  <div style={{ marginTop: 10, fontSize: 12, color: "var(--text-muted)" }}>Or upload JD file:</div>
+                  <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                    <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
+                      onClick={() => jdFileRef.current?.click()}>
+                      <Upload size={12} /> Upload JD
+                    </button>
+                    {jdFile && <span style={{ fontSize: 12, color: "var(--teal-500)", alignSelf: "center" }}>✓ {jdFile.name}</span>}
+                  </div>
+                  <input ref={jdFileRef} type="file" accept=".txt,.pdf,.doc,.docx" style={{ display: "none" }}
+                    onChange={e => setJdFile(e.target.files?.[0] || null)} />
+                </>
+              )}
             </div>
 
             {/* CVs + Settings */}
@@ -923,27 +1158,69 @@ export default function JobLensPage() {
               <div className="tiq-card-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <Users size={15} color="var(--teal-500)" /> CV Files & Thresholds
               </div>
-              <div
-                onClick={() => cvFileRef.current?.click()}
-                style={{ border: "2px dashed var(--border)", borderRadius: 10, padding: 20,
-                  textAlign: "center", cursor: "pointer", marginBottom: 16 }}
-                onMouseEnter={e => (e.currentTarget.style.borderColor = "var(--teal-500)")}
-                onMouseLeave={e => (e.currentTarget.style.borderColor = "var(--border)")}
-              >
-                <Upload size={28} color="var(--text-muted)" style={{ margin: "0 auto 8px" }} />
-                <div style={{ fontSize: 13 }}>
-                  {cvFiles ? (
-                    <span style={{ color: "var(--teal-500)", fontWeight: 600 }}>
-                      {cvFiles.length} CV{cvFiles.length > 1 ? "s" : ""} selected
-                    </span>
+              <div style={{ display: "flex", gap: 14, marginBottom: 12, fontSize: 12 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
+                  <input type="radio" checked={cvSource === "upload"} onChange={() => setCvSource("upload")} />
+                  Upload Files
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: jdSource === "jdManagement" && selectedJdRecordId ? "pointer" : "not-allowed" }}>
+                  <input type="radio" checked={cvSource === "vendor"} disabled={!(jdSource === "jdManagement" && selectedJdRecordId)}
+                    onChange={() => setCvSource("vendor")} />
+                  From Vendor Management
+                </label>
+              </div>
+
+              {cvSource === "vendor" ? (
+                <div style={{ marginBottom: 16 }}>
+                  {!selectedJdRecordId ? (
+                    <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Select a JD (from JD Management) on the left first.</div>
+                  ) : vendorCandidateOptions.length === 0 ? (
+                    <div style={{ fontSize: 12, color: "var(--text-muted)" }}>No vendor-submitted candidates for this JD yet.</div>
                   ) : (
-                    <span>Click to select CVs (PDF, DOCX) — multiple allowed</span>
+                    <div style={{ border: "1px solid var(--border)", borderRadius: 8, maxHeight: 220, overflowY: "auto", padding: 8 }}>
+                      {vendorCandidateOptions.map((vc: any) => (
+                        <label key={vc.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 4px", fontSize: 12, cursor: vc.has_resume ? "pointer" : "not-allowed", opacity: vc.has_resume ? 1 : 0.5 }}>
+                          <input type="checkbox" disabled={!vc.has_resume}
+                            checked={selectedVendorCandidateIds.includes(vc.id)}
+                            onChange={e => setSelectedVendorCandidateIds(prev => e.target.checked ? [...prev, vc.id] : prev.filter(id => id !== vc.id))} />
+                          <span style={{ flex: 1 }}>{vc.name}</span>
+                          <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{vc.vendor_name}</span>
+                          {!vc.has_resume && <span style={{ color: "var(--rose-500)", fontSize: 10 }}>No resume</span>}
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                  {selectedVendorCandidateIds.length > 0 && (
+                    <div style={{ fontSize: 12, color: "var(--teal-500)", marginTop: 6, fontWeight: 600 }}>
+                      {selectedVendorCandidateIds.length} candidate{selectedVendorCandidateIds.length > 1 ? "s" : ""} selected
+                    </div>
                   )}
                 </div>
-                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>PDF, DOCX supported</div>
-              </div>
-              <input ref={cvFileRef} type="file" accept=".pdf,.doc,.docx" multiple style={{ display: "none" }}
-                onChange={e => setCvFiles(e.target.files)} />
+              ) : (
+                <>
+                  <div
+                    onClick={() => cvFileRef.current?.click()}
+                    style={{ border: "2px dashed var(--border)", borderRadius: 10, padding: 20,
+                      textAlign: "center", cursor: "pointer", marginBottom: 16 }}
+                    onMouseEnter={e => (e.currentTarget.style.borderColor = "var(--teal-500)")}
+                    onMouseLeave={e => (e.currentTarget.style.borderColor = "var(--border)")}
+                  >
+                    <Upload size={28} color="var(--text-muted)" style={{ margin: "0 auto 8px" }} />
+                    <div style={{ fontSize: 13 }}>
+                      {cvFiles ? (
+                        <span style={{ color: "var(--teal-500)", fontWeight: 600 }}>
+                          {cvFiles.length} CV{cvFiles.length > 1 ? "s" : ""} selected
+                        </span>
+                      ) : (
+                        <span>Click to select CVs (PDF, DOCX) — multiple allowed</span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>PDF, DOCX supported</div>
+                  </div>
+                  <input ref={cvFileRef} type="file" accept=".pdf,.doc,.docx" multiple style={{ display: "none" }}
+                    onChange={e => setCvFiles(e.target.files)} />
+                </>
+              )}
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                 <div className="tiq-form-group">
@@ -967,7 +1244,11 @@ export default function JobLensPage() {
             <button className="tiq-btn tiq-btn-primary"
               style={{ padding: "12px 40px", fontSize: 15, justifyContent: "center" }}
               onClick={() => runMut.mutate()}
-              disabled={runState.status === "pending" || (!jdText.trim() && !jdFile) || !cvFiles?.length}>
+              disabled={
+                runState.status === "pending" ||
+                (jdSource === "upload" ? (!jdText.trim() && !jdFile) : !selectedJdRecordId) ||
+                (cvSource === "upload" ? !cvFiles?.length : selectedVendorCandidateIds.length === 0)
+              }>
               {runState.status === "pending"
                 ? <><span className="tiq-spinner" style={{ width: 16, height: 16, borderWidth: 2 }} /> Analysing CVs…</>
                 : <><Sparkles size={16} /> Run JobLens Analysis</>}
@@ -1012,55 +1293,76 @@ export default function JobLensPage() {
                 </div>
               )}
 
-              {/* JD Summary */}
-              {activeSession.jd_text && (
+              {/* JD Summary — role/location/company extracted server-side
+                  (LLM when available, filtered heuristic otherwise), not
+                  guessed from raw text client-side. */}
+              {activeSession.jd_text && (activeSession.jd_role || activeSession.jd_location || activeSession.jd_company || (activeSession.jd_skills || []).length > 0) && (
                 <div className="tiq-card tiq-mb-4" style={{ borderLeft: "4px solid var(--violet-500)" }}>
                   <div className="tiq-card-title" style={{ fontSize: 12, marginBottom: 12 }}>Job Description Summary</div>
-                  {(() => {
-                    const jd = activeSession.jd_text || "";
-                    // Extract role — first meaningful line
-                    const lines = jd.split("\n").map((l: string) => l.trim()).filter(Boolean);
-                    const roleMatch = jd.match(/(?:job\s*title|role|position)\s*[:\-]\s*(.+)/i);
-                    const role = roleMatch ? roleMatch[1].trim() : lines[0]?.slice(0, 80);
-                    // Extract location
-                    const locMatch = jd.match(/(?:location|based\s*in|located\s*in)\s*[:\-]\s*(.+)/i);
-                    const location = locMatch ? locMatch[1].trim().split("\n")[0] : "";
-                    // Extract company
-                    const compMatch = jd.match(/(?:company|organisation|employer|about\s+us)\s*[:\-]\s*(.+)/i);
-                    const company = compMatch ? compMatch[1].trim().split("\n")[0] : "";
-                    return (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                        {role && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {activeSession.jd_role && (
+                      <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", width: 90, flexShrink: 0 }}>JD TITLE</span>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{activeSession.jd_role}</span>
+                      </div>
+                    )}
+                    {activeSession.jd_location && (
+                      <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", width: 90, flexShrink: 0 }}>LOCATION</span>
+                        <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{activeSession.jd_location}</span>
+                      </div>
+                    )}
+                    {(activeSession.jd_client_name || activeSession.jd_company) && (
+                      <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", width: 90, flexShrink: 0 }}>CLIENT NAME</span>
+                        <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{activeSession.jd_client_name || activeSession.jd_company}</span>
+                      </div>
+                    )}
+
+                    {(activeSession.jd_essential_skills?.length > 0 || activeSession.jd_good_to_have_skills?.length > 0 || activeSession.jd_optional_skills?.length > 0) ? (
+                      <>
+                        {activeSession.jd_essential_skills?.length > 0 && (
                           <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-                            <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", width: 60, flexShrink: 0 }}>ROLE</span>
-                            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{role}</span>
-                          </div>
-                        )}
-                        {location && (
-                          <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-                            <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", width: 60, flexShrink: 0 }}>LOCATION</span>
-                            <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{location}</span>
-                          </div>
-                        )}
-                        {company && (
-                          <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-                            <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", width: 60, flexShrink: 0 }}>COMPANY</span>
-                            <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{company}</span>
-                          </div>
-                        )}
-                        {(activeSession.jd_skills || []).length > 0 && (
-                          <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-                            <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", width: 60, flexShrink: 0, paddingTop: 2 }}>SKILLS</span>
-                            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                              {(activeSession.jd_skills || []).slice(0, 25).map((s: string) => (
-                                <span key={s} className="tiq-badge tiq-badge-violet" style={{ fontSize: 10 }}>{s}</span>
+                            <span style={{ fontSize: 11, fontWeight: 700, color: "#ef4444", width: 90, flexShrink: 0, paddingTop: 2 }}>ESSENTIAL</span>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                              {activeSession.jd_essential_skills.slice(0, 25).map((s: string) => (
+                                <span key={s} className="tiq-badge" style={{ fontSize: 10, background: "#ef444420", color: "#ef4444" }}>{s}</span>
                               ))}
                             </div>
                           </div>
                         )}
+                        {activeSession.jd_good_to_have_skills?.length > 0 && (
+                          <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                            <span style={{ fontSize: 11, fontWeight: 700, color: "#f59e0b", width: 90, flexShrink: 0, paddingTop: 2 }}>GOOD TO HAVE</span>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                              {activeSession.jd_good_to_have_skills.slice(0, 25).map((s: string) => (
+                                <span key={s} className="tiq-badge" style={{ fontSize: 10, background: "#f59e0b20", color: "#f59e0b" }}>{s}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {activeSession.jd_optional_skills?.length > 0 && (
+                          <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                            <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", width: 90, flexShrink: 0, paddingTop: 2 }}>OPTIONAL</span>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                              {activeSession.jd_optional_skills.slice(0, 25).map((s: string) => (
+                                <span key={s} className="tiq-badge tiq-badge-slate" style={{ fontSize: 10 }}>{s}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    ) : (activeSession.jd_skills || []).length > 0 && (
+                      <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", width: 90, flexShrink: 0, paddingTop: 2 }}>SKILLS</span>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                          {(activeSession.jd_skills || []).slice(0, 25).map((s: string) => (
+                            <span key={s} className="tiq-badge tiq-badge-violet" style={{ fontSize: 10 }}>{s}</span>
+                          ))}
+                        </div>
                       </div>
-                    );
-                  })()}
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -1091,6 +1393,7 @@ export default function JobLensPage() {
                         <th>Candidate</th>
                         <th>Email</th>
                         <th>Phone</th>
+                        <th>Vendor</th>
                         <th>Resume Summary</th>
                         <th>ATS Score</th>
                         <th>Key Strength</th>
