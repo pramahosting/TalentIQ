@@ -6,7 +6,7 @@ All tables prefixed tiq_ to coexist with AccFino on the same Neon database.
 from datetime import datetime
 from sqlalchemy import (
     Column, Integer, String, Text, Float, Boolean,
-    DateTime, ForeignKey, JSON, LargeBinary,
+    DateTime, ForeignKey, JSON, LargeBinary, UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 
@@ -145,6 +145,8 @@ class JobMatch(Base):
     strengths    = Column(JSON)
     improvements = Column(JSON)
     summary      = Column(JSON)
+    strengths_breakdown = Column(JSON)  # technical/business/soft skills, experience, certs — see utils/llm_extraction.py
+    jd_requirements     = Column(JSON)  # essential/good_to_have/optional
     cover_letter = Column(Text)
     matched_at   = Column(DateTime, default=datetime.utcnow)
 
@@ -328,7 +330,8 @@ class JobLensCandidate(Base):
     experience_years    = Column(String(20))
     summary             = Column(Text)
     interview_questions = Column(JSON, default=list)
-    resume_summary      = Column(JSON, default=list)   # 10-statement AI resume summary
+    resume_summary      = Column(JSON, default=dict)   # categorized bullets: experience/skills/education/achievements/availability_work_rights
+    strengths_breakdown = Column(JSON)  # technical/business/soft skills, experience, certs — see utils/llm_extraction.py
     interview_token     = Column(String(64), unique=True, index=True, nullable=True)
     contacted           = Column(Boolean, default=False)  # invite email sent
     video_status        = Column(String(50), default="Pending")
@@ -433,6 +436,8 @@ CANDIDATE_STATUSES = [
     "Selected", "Offered", "Rejected",
 ]
 
+WORK_PERMISSION_OPTIONS = ["Work Visa", "Permanent Resident", "Citizenship"]
+
 
 class JDRecord(Base):
     __tablename__ = "tiq_jd_records"
@@ -441,10 +446,28 @@ class JDRecord(Base):
     user_id         = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
     sequence_number = Column(Integer)             # per-user sequential display number (1, 2, 3...)
     title           = Column(String(300), nullable=False)
-    company_name    = Column(String(300))         # legacy free-text client name — kept for backward compatibility
-    client_id       = Column(Integer, ForeignKey("tiq_clients.id"), nullable=True)  # proper link, new
+    client_id       = Column(Integer, ForeignKey("tiq_clients.id"), nullable=True)  # sole link to the client — no redundant free-text copy (3NF)
     status          = Column(String(30), default="Open")
     description     = Column(Text)
+    # Categorized requirements — extracted once (LLM or heuristic) when the
+    # JD is created/edited and persisted here, rather than re-extracted from
+    # `description` on every read. Modeled as owned JSON arrays rather than
+    # a separate requirement-per-row child table: each JD wholly owns and
+    # replaces its own requirement list as a unit (never referenced
+    # independently elsewhere), so a child table would add join/CRUD
+    # overhead without a normalization benefit in practice — see the
+    # architecture doc for the fully-normalized reference design.
+    essential_skills      = Column(JSON, default=list)
+    good_to_have_skills   = Column(JSON, default=list)
+    optional_skills       = Column(JSON, default=list)
+    min_years_experience  = Column(Integer, default=0)
+    education_requirement = Column(String(300))
+    # Optional uploaded JD document (Word/PDF) — description text field
+    # above is still the source used for requirement extraction; this is
+    # the original document for reference/download.
+    jd_file_blob     = Column(LargeBinary)
+    jd_file_filename = Column(String(300))
+    jd_file_mimetype = Column(String(100))
     created_at      = Column(DateTime, default=datetime.utcnow)
     updated_at      = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -460,10 +483,10 @@ class Vendor(Base):
     user_id          = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
     sequence_number  = Column(Integer)   # per-user sequential display number
     name             = Column(String(300), nullable=False)
-    location         = Column(String(300))
+    address          = Column(String(300))
     contact_email    = Column(String(200))
     contact_phone    = Column(String(50))
-    area_of_coverage = Column(String(300))   # e.g. "APAC", "Sydney/Melbourne", "Remote"
+    coverage_region  = Column(String(300))   # e.g. "APAC", "Sydney/Melbourne", "Remote"
     technical_area   = Column(String(300))   # e.g. "Data Engineering, Cloud"
     company_details  = Column(Text)
     created_at       = Column(DateTime, default=datetime.utcnow)
@@ -479,9 +502,8 @@ class Client(Base):
     id                = Column(Integer, primary_key=True, index=True)
     user_id           = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
     name              = Column(String(300), nullable=False)
-    location          = Column(String(300))
+    address           = Column(String(300))
     abn               = Column(String(50))
-    partnership_from  = Column(DateTime)      # partnership start date
     area_of_work      = Column(String(300))
     created_at        = Column(DateTime, default=datetime.utcnow)
     updated_at        = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -504,6 +526,8 @@ class TrackedCandidate(Base):
     resume_filename  = Column(String(300))
     resume_mimetype  = Column(String(100))
     status           = Column(String(30), default="Applied")
+    address          = Column(String(300))
+    work_permission  = Column(String(50))   # "Work Visa" / "Permanent Resident" / "Citizenship"
 
     # Duplicate handling: the FIRST submitted candidate for a given JD with
     # matching email/phone stays primary (is_duplicate=False); any later
@@ -535,3 +559,22 @@ class CandidateStatusLog(Base):
     changed_at   = Column(DateTime, default=datetime.utcnow)
 
     candidate = relationship("TrackedCandidate", back_populates="status_logs", foreign_keys=[candidate_id])
+
+
+class JDVendorLink(Base):
+    """Explicit junction table for the JD <-> Vendor many-to-many
+    relationship ("one JD can receive candidates from multiple vendors;
+    one vendor can submit to multiple JDs"). Auto-maintained whenever a
+    candidate is submitted (see _link_jd_vendor in routers/candidatetrack.py)
+    — never exposed as its own tab or CRUD screen; it exists purely to back
+    "vendors involved in this JD" / "JDs this vendor is involved in" with a
+    real indexed relationship table instead of a DISTINCT scan over
+    tracked_candidates on every read.
+    """
+    __tablename__ = "tiq_jd_vendor_links"
+    __table_args__ = (UniqueConstraint("jd_id", "vendor_id", name="uq_jd_vendor"),)
+
+    id             = Column(Integer, primary_key=True, index=True)
+    jd_id          = Column(Integer, ForeignKey("tiq_jd_records.id"), nullable=False, index=True)
+    vendor_id      = Column(Integer, ForeignKey("tiq_vendors.id"), nullable=False, index=True)
+    first_linked_at = Column(DateTime, default=datetime.utcnow)

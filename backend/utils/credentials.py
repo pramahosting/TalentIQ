@@ -28,6 +28,22 @@ from models.models import UserAPIKey
 # platform credentials (LinkedIn, email, etc.) to this set.
 SHAREABLE_SERVICES = {"groq", "ollama", "adzuna"}
 
+# Fallback ONLY — used when a user (and no admin-shared global) has set a
+# Groq model. Groq periodically deprecates models (llama3-70b-8192, then
+# even its own recommended replacement llama-3.3-70b-versatile, both
+# retired within about a year of each other) — every call site should go
+# through get_groq_model() below instead of hardcoding a model string, so
+# updating this one constant (or just setting a model in Settings) is
+# enough to recover from a future deprecation without touching code.
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
+
+
+async def get_groq_model(db: AsyncSession, user_id: int) -> str:
+    """Returns the Groq model to use for this user: their own saved model,
+    else the admin-configured global one, else DEFAULT_GROQ_MODEL."""
+    model = await get_credential(db, user_id, "groq", "model")
+    return model or DEFAULT_GROQ_MODEL
+
 
 async def get_credential(
     db: AsyncSession, user_id: int, service: str, key_name: str,

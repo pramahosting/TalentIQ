@@ -15,7 +15,7 @@ from sqlalchemy import select
 from db.database import get_db
 from models.models import User, UserAPIKey, CVAnalysisRecord
 from utils.auth_utils import get_current_user
-from utils.credentials import get_credential
+from utils.credentials import get_credential, get_groq_model, DEFAULT_GROQ_MODEL
 from utils.sequencing import next_sequence_number
 
 router = APIRouter()
@@ -177,184 +177,172 @@ STOPWORDS = {"a","an","the","and","or","of","in","on","for","with","to","be","is
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _normalize_skill(s: str) -> str:
-    return re.sub(r"\s+", " ", s.strip().lower())
+    s = re.sub(r"\s+", " ", s.strip().lower())
+    # UK/US spelling normalization — general-purpose, not a per-skill fix.
+    # Without this, "dimensional modelling" and "data modeling" don't even
+    # get a chance to match on their shared root word.
+    for pattern, repl in _UK_TO_US_SPELLING:
+        s = re.sub(pattern, repl, s)
+    return s
+
+
+_UK_TO_US_SPELLING = [
+    (r"\bmodelling\b", "modeling"), (r"\blabelling\b", "labeling"),
+    (r"\bcancelled\b", "canceled"), (r"\btravelling\b", "traveling"),
+    (r"\borganisation", "organization"), (r"\bcolour", "color"),
+    (r"\blicence", "license"), (r"\bcentre\b", "center"),
+    (r"\bprogramme\b", "program"), (r"\banalyse", "analyze"),
+    (r"\boptimise", "optimize"), (r"\bcategorise", "categorize"),
+    (r"\bcustomise", "customize"), (r"\bfavour", "favor"),
+    (r"\bbehaviour", "behavior"), (r"\bvisualise", "visualize"),
+    (r"\bsummarise", "summarize"), (r"\bspecialise", "specialize"),
+]
+
+# Two kinds of entries, both one-directional (key = the general/JD-style
+# term; values = things that, if found in a resume, PROVE the general term
+# is satisfied):
+#   - true synonyms/abbreviations (AI <-> Artificial Intelligence)
+#   - specific technique -> general skill it's a form of (Dimensional
+#     Modelling is A KIND OF Data Modeling, so it should count)
+# The second category is deliberately curated rather than inferred by
+# fuzzy string similarity — inferring "X modeling matches Y modeling" from
+# string shape alone is exactly what causes false positives (e.g.
+# "financial modeling" and "data modeling" share a word but are unrelated
+# skills). Encoding actual verified domain relationships avoids that.
+_SKILL_SYNONYMS = {
+    "ai": ["artificial intelligence"], "artificial intelligence": ["ai"],
+    "ml": ["machine learning"], "machine learning": ["ml",
+        "regression", "classification", "neural network", "deep learning",
+        "supervised learning", "unsupervised learning", "random forest",
+        "gradient boosting", "xgboost", "scikit-learn", "tensorflow", "pytorch"],
+    "bi": ["business intelligence"], "business intelligence": ["bi"],
+    "power bi": ["powerbi", "power-bi"],
+    "aws": ["amazon web services", "ec2", "s3", "redshift", "lambda",
+        "aws glue", "amazon redshift", "cloudformation"],
+    "amazon web services": ["aws"],
+    "azure": ["microsoft azure", "azure data factory", "azure synapse",
+        "azure synapse analytics", "adls", "adls gen2", "azure devops"],
+    "gcp": ["google cloud platform", "google cloud", "bigquery", "gcp bigquery"],
+    "google cloud platform": ["gcp"],
+    "api": ["apis", "application programming interface", "rest api", "restful api", "graphql"],
+    "apis": ["api"],
+    "etl": ["extract transform load", "extract, transform, load", "elt",
+        "data pipeline", "airflow", "dbt", "informatica", "talend", "ssis"],
+    "elt": ["etl"],
+    "data pipeline": ["etl", "elt", "airflow", "dbt", "data pipelines"],
+    "sql": ["structured query language", "t-sql", "pl/sql", "mysql", "postgresql", "postgres"],
+    "ci/cd": ["ci cd", "continuous integration", "continuous deployment", "jenkins", "github actions"],
+    "devops": ["dev ops"],
+    "nlp": ["natural language processing"], "natural language processing": ["nlp"],
+    "llm": ["large language model", "large language models", "gpt", "generative ai"],
+    "data governance": ["governance framework", "data governance framework",
+        "data stewardship", "data catalog", "data cataloguing", "data lineage",
+        "data quality framework", "collibra", "alation"],
+    "edw": ["enterprise data warehouse"], "enterprise data warehouse": ["edw"],
+    "mdm": ["master data management"], "master data management": ["mdm"],
+    "data mesh": ["domain-oriented data", "data domain", "data products"],
+    "kpi": ["key performance indicator"],
+    "ux": ["user experience"], "ui": ["user interface"],
+    "qa": ["quality assurance"],
+    "pm": ["project management", "project manager"],
+    "hr": ["human resources"],
+    "crm": ["customer relationship management", "salesforce"],
+    "erp": ["enterprise resource planning", "sap", "oracle erp", "netsuite"],
+    # ── Data modeling / architecture: specific technique -> general skill ──
+    "data modeling": [
+        "dimensional modeling", "dimensional model", "data vault",
+        "data vault 2.0", "star schema", "snowflake schema",
+        "entity relationship modeling", "er modeling", "erd",
+        "third normal form", "3nf modeling", "kimball", "inmon",
+        "fsldm", "logical data modeling", "physical data modeling",
+        "conceptual data modeling", "normalization", "denormalization",
+    ],
+    "data modelling": ["data modeling"],  # falls through to the US-spelling key above via normalization
+    "data architecture": [
+        "data mesh", "data fabric", "lakehouse", "data lakehouse",
+        "enterprise data warehouse", "edw", "data lake", "data warehouse",
+        "solution architecture", "enterprise architecture",
+    ],
+    "cloud architecture": ["aws", "azure", "gcp", "multi-cloud", "hybrid cloud"],
+}
 
 
 def _skill_present(skill: str, candidate_skills: set, resume_lower: str) -> bool:
-    """A skill counts as present if it's in the extracted skill list OR
-    appears as a substring in the raw resume text (catches skills the LLM
-    extraction missed, e.g. mentioned once in a project description)."""
+    """A skill counts as present if any of the following hold — designed to
+    catch real-world phrasing variance rather than only an exact match:
+      1. it's in the LLM-extracted candidate skill list (allowing either
+         side to be a substring of the other, e.g. "python" vs "python 3")
+      2. the exact phrase appears literally in the resume text (after
+         UK/US spelling normalization on both sides)
+      3. a known synonym, abbreviation, or specific-technique-that-implies-
+         the-general-skill appears in the resume text (curated list, not
+         blind fuzzy matching — see _SKILL_SYNONYMS above for why)
+      4. for multi-word skills, all of its significant words appear
+         somewhere in the resume (not necessarily contiguous) — catches
+         cases like a JD's "data governance" matching a resume's
+         "established governance frameworks across enterprise data"
+    Exact substring matching alone was producing false-negative "gaps" for
+    skills that were genuinely present in the resume, just phrased,
+    abbreviated, or spelled differently than the JD's exact wording.
+    """
     sk = _normalize_skill(skill)
+
     if any(sk in cs or cs in sk for cs in candidate_skills):
         return True
-    return sk in resume_lower
+
+    if sk in resume_lower:
+        return True
+
+    for variant in _SKILL_SYNONYMS.get(sk, []):
+        if _normalize_skill(variant) in resume_lower:
+            return True
+
+    words = [w for w in sk.split() if len(w) > 2]
+    if len(words) >= 2 and all(w in resume_lower for w in words):
+        return True
+
+    return False
 
 
-async def _extract_jd_requirements(jd: str, groq_key: Optional[str]) -> dict:
-    """Structured requirements extraction. Falls back to a keyword-bank
-    heuristic when no Groq key is configured."""
-    if groq_key:
-        try:
-            from langchain_groq import ChatGroq
-            from langchain.schema import HumanMessage
-
-            llm = ChatGroq(api_key=groq_key, model="llama3-70b-8192", temperature=0.1)
-            prompt = f"""You are an expert technical recruiter. Read the job description below
-and extract its requirements precisely — do not invent requirements that
-aren't stated or clearly implied.
-
-JOB DESCRIPTION:
-\"\"\"{jd[:4000]}\"\"\"
-
-Return ONLY valid JSON, no markdown, no commentary:
-{{
-  "role_title": "<best-guess title>",
-  "required_hard_skills": ["<skill>", ...],
-  "nice_to_have_skills": ["<skill>", ...],
-  "min_years_experience": <integer, 0 if not stated>,
-  "education_requirement": "<short phrase, or empty string if not stated>",
-  "seniority_level": "<Junior|Mid|Senior|Lead|Executive|Not specified>",
-  "key_responsibilities": ["<responsibility>", ...]
-}}"""
-            resp = llm.invoke([HumanMessage(content=prompt)])
-            raw = resp.content.strip()
-            raw = re.sub(r"```(?:json)?|```", "", raw).strip()
-            data = json.loads(raw)
-            if data.get("required_hard_skills"):
-                return data
-        except Exception:
-            pass
-    return _fallback_jd_requirements(jd)
+def _normalize_text(s: str) -> str:
+    """Same UK/US spelling normalization as _normalize_skill, applied to a
+    full block of text (resume/JD) rather than a single skill phrase — both
+    sides of a comparison need this or spelling normalization does nothing."""
+    s = s.lower()
+    for pattern, repl in _UK_TO_US_SPELLING:
+        s = re.sub(pattern, repl, s)
+    return s
 
 
-def _fallback_jd_requirements(jd: str) -> dict:
-    jd_lower = jd.lower()
-    found = [s for s in DOMAIN_SKILLS if s in jd_lower]
-    # Also pick up capitalised/technical-looking tokens not in our bank
-    extra = []
-    for t in re.findall(r"\b([a-zA-Z][a-zA-Z0-9+#.\-]{2,})\b", jd):
-        tl = t.lower()
-        if tl not in STOPWORDS and tl not in found and tl not in extra and len(t) > 3:
-            extra.append(tl)
-    all_skills = list(dict.fromkeys(found + extra))[:25]
-
-    years_m = re.search(r"(\d{1,2})\+?\s*(?:years?|yrs?)\s*(?:of\s+)?experience", jd_lower)
-    min_years = int(years_m.group(1)) if years_m else 0
-
-    edu = ""
-    edu_m = re.search(r"(bachelor'?s?|master'?s?|phd|degree|diploma)[^.]{0,80}", jd_lower)
-    if edu_m:
-        edu = edu_m.group().strip().capitalize()
-
-    return {
-        "role_title": "",
-        "required_hard_skills": all_skills[:15],
-        "nice_to_have_skills": all_skills[15:20],
-        "min_years_experience": min_years,
-        "education_requirement": edu,
-        "seniority_level": "Not specified",
-        "key_responsibilities": [],
-    }
-
-
-async def _extract_candidate_profile(resume: str, jd_requirements: dict, groq_key: Optional[str]) -> dict:
-    """Structured candidate profile extraction, plus narrative feedback
-    written WITH the JD requirements in view (so strengths/gaps are
-    specific to this job, not generic resume advice). Falls back to a
-    keyword heuristic profile (no narrative) when no Groq key is set."""
-    if groq_key:
-        try:
-            from langchain_groq import ChatGroq
-            from langchain.schema import HumanMessage
-
-            llm = ChatGroq(api_key=groq_key, model="llama3-70b-8192", temperature=0.15)
-            prompt = f"""You are an expert ATS engine and recruitment analyst. You have already
-extracted these requirements from the job description:
-{json.dumps(jd_requirements, indent=2)[:1500]}
-
-Now read the resume below and extract the candidate's profile, then give
-specific feedback comparing them to the requirements above. Be precise and
-factual — do not credit skills or experience the resume doesn't support.
-
-RESUME:
-\"\"\"{resume[:4000]}\"\"\"
-
-Return ONLY valid JSON, no markdown, no commentary:
-{{
-  "candidate_hard_skills": ["<skill>", ...],
-  "years_experience": <integer, best estimate from resume>,
-  "education": "<highest qualification found, or empty string>",
-  "seniority_level": "<Junior|Mid|Senior|Lead|Executive>",
-  "strengths": ["<specific to this JD>", "<...>", "<...>"],
-  "gaps": ["<specific missing requirement>", "<...>", "<...>"],
-  "suggestions": ["<actionable, specific>", "<...>", "<...>", "<...>"],
-  "summaryAssessment": "<2-3 sentences, specific to this role>",
-  "formatWarnings": ["<...>", "<...>"]
-}}"""
-            resp = llm.invoke([HumanMessage(content=prompt)])
-            raw = resp.content.strip()
-            raw = re.sub(r"```(?:json)?|```", "", raw).strip()
-            data = json.loads(raw)
-            if data.get("candidate_hard_skills") is not None:
-                data["_ai_powered"] = True
-                return data
-        except Exception:
-            pass
-    return _fallback_candidate_profile(resume)
-
-
-def _fallback_candidate_profile(resume: str) -> dict:
-    resume_lower = resume.lower()
-    found_skills = [s for s in DOMAIN_SKILLS if s in resume_lower]
-
-    years_m = re.findall(r"(\d{1,2})\+?\s*(?:years?|yrs?)\s*(?:of\s+)?experience", resume_lower)
-    years = max((int(y) for y in years_m), default=0)
-
-    education = ""
-    edu_m = re.search(r"(bachelor'?s?|master'?s?|phd|degree|diploma)[^.\n]{0,80}", resume_lower)
-    if edu_m:
-        education = edu_m.group().strip().capitalize()
-
-    return {
-        "candidate_hard_skills": found_skills,
-        "years_experience": years,
-        "education": education,
-        "seniority_level": "Not specified",
-        "strengths": [],
-        "gaps": [],
-        "suggestions": [],
-        "summaryAssessment": "",
-        "formatWarnings": [],
-        "_ai_powered": False,
-    }
-
-
-def _compute_weighted_score(jd_req: dict, profile: dict, resume: str) -> dict:
+def _compute_weighted_score(jd_req: dict, strengths: dict, resume: str) -> dict:
     """Deterministic, transparent scoring — plain Python math over the
     structured fields extracted above. Weights: hard-skill coverage 50%,
-    experience-level fit 25%, education fit 10%, nice-to-have bonus 10%,
+    experience-level fit 25%, education fit 10%, good-to-have bonus 10%,
     baseline content-depth allowance 5%."""
-    resume_lower = resume.lower()
-    candidate_skill_set = {_normalize_skill(s) for s in profile.get("candidate_hard_skills", [])}
+    resume_lower = _normalize_text(resume)
+    candidate_skill_set = {
+        _normalize_skill(s) for s in
+        (strengths.get("technical_skills", []) + strengths.get("business_skills", []))
+    }
 
-    required = [_normalize_skill(s) for s in jd_req.get("required_hard_skills", []) if s]
-    nice = [_normalize_skill(s) for s in jd_req.get("nice_to_have_skills", []) if s]
+    essential = [_normalize_skill(s) for s in jd_req.get("essential", []) if s]
+    good_to_have = [_normalize_skill(s) for s in jd_req.get("good_to_have", []) if s]
 
-    matched = [s for s in required if _skill_present(s, candidate_skill_set, resume_lower)]
-    missing = [s for s in required if s not in matched]
-    matched_nice = [s for s in nice if _skill_present(s, candidate_skill_set, resume_lower)]
+    matched = [s for s in essential if _skill_present(s, candidate_skill_set, resume_lower)]
+    missing = [s for s in essential if s not in matched]
+    matched_good = [s for s in good_to_have if _skill_present(s, candidate_skill_set, resume_lower)]
 
-    skills_pct = round(len(matched) / len(required) * 100) if required else 70
+    skills_pct = round(len(matched) / len(essential) * 100) if essential else 70
 
     min_years = jd_req.get("min_years_experience") or 0
-    cand_years = profile.get("years_experience") or 0
+    cand_years = strengths.get("years_experience") or 0
     if min_years <= 0:
         experience_pct = 85
     else:
         experience_pct = max(20, min(100, round(cand_years / min_years * 100)))
 
     edu_req = (jd_req.get("education_requirement") or "").lower()
-    edu_cand = (profile.get("education") or "").lower()
+    edu_cand = (strengths.get("education") or "").lower()
     if not edu_req:
         education_pct = 90
     elif edu_cand and (edu_cand in edu_req or edu_req in edu_cand or
@@ -363,13 +351,13 @@ def _compute_weighted_score(jd_req: dict, profile: dict, resume: str) -> dict:
     else:
         education_pct = 45
 
-    nice_bonus_pct = min(100, len(matched_nice) * 25) if nice else 60
+    good_to_have_bonus_pct = min(100, len(matched_good) * 25) if good_to_have else 60
 
     overall = (
         skills_pct * 0.50 +
         experience_pct * 0.25 +
         education_pct * 0.10 +
-        nice_bonus_pct * 0.10 +
+        good_to_have_bonus_pct * 0.10 +
         75 * 0.05
     )
     overall = max(8, min(98, round(overall)))
@@ -381,59 +369,58 @@ def _compute_weighted_score(jd_req: dict, profile: dict, resume: str) -> dict:
         "education_pct": education_pct,
         "matched": matched,
         "missing": missing,
-        "matched_nice": matched_nice,
+        "matched_good_to_have": matched_good,
     }
 
 
-async def _score_resume(resume: str, jd: str, groq_key: Optional[str]) -> dict:
-    jd_req = await _extract_jd_requirements(jd, groq_key)
-    profile = await _extract_candidate_profile(resume, jd_req, groq_key)
-    scoring = _compute_weighted_score(jd_req, profile, resume)
-    ai_powered = bool(profile.pop("_ai_powered", False))
+async def _score_resume(resume: str, jd: str, groq_key: Optional[str], groq_model: str = DEFAULT_GROQ_MODEL) -> dict:
+    from utils.llm_extraction import extract_jd_requirements_categorized, extract_candidate_strengths
+
+    jd_req = await extract_jd_requirements_categorized(jd, groq_key, groq_model)
+    strengths = await extract_candidate_strengths(resume, jd_req, groq_key, groq_model)
+    scoring = _compute_weighted_score(jd_req, strengths, resume)
+    ai_powered = bool(strengths.get("ai_powered", False))
 
     matched, missing = scoring["matched"], scoring["missing"]
     overall = scoring["overall"]
 
-    strengths = profile.get("strengths") or []
-    gaps = profile.get("gaps") or []
-    suggestions = profile.get("suggestions") or []
-    summary = profile.get("summaryAssessment") or ""
-    format_warnings = profile.get("formatWarnings") or []
-
-    # Deterministic fallback narrative if the LLM path wasn't used (or
-    # returned thin content) — grounded directly in the computed match,
-    # not a separate guess.
-    if not strengths:
-        if matched:
-            strengths.append(f"Matches {len(matched)} of {len(jd_req.get('required_hard_skills', []) or [1])} required skills: {', '.join(matched[:6])}")
-        if scoring["experience_pct"] >= 90:
-            strengths.append("Experience level meets or exceeds the role's requirement")
-        if not strengths:
-            strengths.append("Resume presents a relevant professional background")
+    gaps = strengths.get("gaps") or [f"Missing required skill: {s}" for s in missing[:6]]
     if not gaps:
-        gaps = [f"Missing required skill: {s}" for s in missing[:6]] or ["No major skill gaps detected against the extracted requirements"]
-    if not suggestions:
-        suggestions = [f'Add specific, verifiable experience with "{s}" if you have it' for s in missing[:4]]
-        suggestions += [
-            "Quantify achievements with concrete metrics (%, $, time saved)",
-            "Mirror the exact terminology used in the job description",
-        ]
+        gaps = ["No major gaps detected against the extracted requirements"]
+
+    suggestions = [f'Add specific, verifiable experience with "{s}" if you have it' for s in missing[:4]]
+    suggestions += [
+        "Quantify achievements with concrete metrics (%, $, time saved)",
+        "Mirror the exact terminology used in the job description",
+    ]
+
+    summary = strengths.get("summary") or ""
     if not summary:
-        exp_clause = f" and roughly {scoring['experience_pct']}% of the target experience level" if jd_req.get('min_years_experience') else ""
+        exp_clause = f" and roughly {scoring['experience_pct']}% of the target experience level" if jd_req.get("min_years_experience") else ""
         summary = (
-            f"Matches {scoring['skills_pct']}% of the required hard skills{exp_clause}. "
+            f"Matches {scoring['skills_pct']}% of the essential requirements{exp_clause}. "
             f"Overall fit: {'Strong' if overall >= 75 else 'Moderate' if overall >= 55 else 'Needs improvement'}."
         )
-    if not format_warnings:
-        format_warnings = [
-            "Use standard ATS-compatible section headers (Experience, Education, Skills)",
-            "Avoid tables, columns, or text boxes — ATS parsers often can't read them",
-        ]
+
+    format_warnings = [
+        "Use standard ATS-compatible section headers (Experience, Education, Skills)",
+        "Avoid tables, columns, or text boxes — ATS parsers often can't read them",
+    ]
+
+    # Flat "strengths" list retained for any older UI code expecting one —
+    # built from the richer categorized breakdown, not a separate guess.
+    flat_strengths = []
+    if scoring["matched"]:
+        flat_strengths.append(f"Matches {len(matched)} of {len(jd_req.get('essential', []) or [1])} essential requirements")
+    flat_strengths += strengths.get("significant_experience", [])[:2]
+    flat_strengths += strengths.get("certifications_degrees", [])[:2]
+    if not flat_strengths:
+        flat_strengths = ["Resume presents a relevant professional background"]
 
     return {
         "overallScore": overall,
-        "strengths": strengths[:6],
-        "gaps": gaps[:6],
+        "strengths": flat_strengths[:6],
+        "gaps": gaps[:8],
         "suggestions": suggestions[:6],
         "summaryAssessment": summary,
         "formatWarnings": format_warnings[:4],
@@ -448,16 +435,29 @@ async def _score_resume(resume: str, jd: str, groq_key: Optional[str]) -> dict:
         "matchedSkills": [s.title() for s in matched][:15],
         "missingSkills": [s.title() for s in missing][:15],
         "aiPowered": ai_powered,
-        "extractedRequirements": {
-            "roleTitle": jd_req.get("role_title", ""),
+        # ── Categorized strengths — the actual point of this round's change ──
+        "strengthsBreakdown": {
+            "essentialMatched": strengths.get("essential_matched", []),
+            "technicalSkills": strengths.get("technical_skills", []),
+            "businessSkills": strengths.get("business_skills", []),
+            "softSkills": strengths.get("soft_skills", []),
+            "significantExperience": strengths.get("significant_experience", []),
+            "certificationsDegrees": strengths.get("certifications_degrees", []),
+        },
+        # ── Categorized JD requirements — mirrors CandidateLens's JD Summary ──
+        "jdRequirements": {
+            "roleTitle": jd_req.get("role", ""),
+            "location": jd_req.get("location", ""),
+            "company": jd_req.get("company", ""),
+            "essential": jd_req.get("essential", []),
+            "goodToHave": jd_req.get("good_to_have", []),
+            "optional": jd_req.get("optional", []),
             "minYearsExperience": jd_req.get("min_years_experience", 0),
             "educationRequirement": jd_req.get("education_requirement", ""),
-            "seniorityLevel": jd_req.get("seniority_level", ""),
         },
         "candidateProfile": {
-            "yearsExperience": profile.get("years_experience", 0),
-            "education": profile.get("education", ""),
-            "seniorityLevel": profile.get("seniority_level", ""),
+            "yearsExperience": strengths.get("years_experience", 0),
+            "education": strengths.get("education", ""),
         },
     }
 
@@ -510,7 +510,8 @@ async def analyze_resume(
     # ── Score (structured JD/requirement extraction + deterministic weighting) ──
     groq_key = await get_credential(db, current_user.id, "groq", "api_key")
 
-    result = await _score_resume(final_resume, final_jd, groq_key)
+    groq_model = await get_groq_model(db, current_user.id)
+    result = await _score_resume(final_resume, final_jd, groq_key, groq_model)
     if not groq_key:
         result["note"] = "Add a Groq API key in Settings for AI-powered requirement extraction and feedback"
 

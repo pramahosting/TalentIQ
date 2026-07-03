@@ -20,7 +20,7 @@ from schemas.schemas import (
     MatchRequest, JobMatchOut, JobOut,
 )
 from utils.auth_utils import get_current_user
-from utils.credentials import get_credential
+from utils.credentials import get_credential, get_groq_model
 from utils.sequencing import next_sequence_number
 from agents.jobhunt_agent import (
     scrape_jobs_adzuna, parse_resume_text,
@@ -314,10 +314,11 @@ async def match_resume(
         raise HTTPException(status_code=404, detail="No jobs found for this search")
 
     groq_key = await _get_user_api_key(current_user.id, "groq", "api_key", db)
+    groq_model = await get_groq_model(db, current_user.id)
 
     # Extract the candidate's profile ONCE for this batch — reused across
     # every job below instead of re-extracting the same resume repeatedly.
-    candidate_profile = await extract_candidate_profile(resume.raw_text or "", groq_key)
+    candidate_profile = await extract_candidate_profile(resume.raw_text or "", groq_key, groq_model)
 
     match_objs = []
     for job in jobs:
@@ -327,9 +328,9 @@ async def match_resume(
             "description": job.description or "",
             "apply_link": job.apply_link,
         }
-        match_data = await calculate_match(resume.raw_text or "", job_dict, groq_key, candidate_profile)
+        match_data = await calculate_match(resume.raw_text or "", job_dict, groq_key, candidate_profile, groq_model)
         cover = generate_cover_letter(
-            resume.raw_text or "", resume.parsed_data or {}, job_dict, groq_key
+            resume.raw_text or "", resume.parsed_data or {}, job_dict, groq_key, groq_model
         )
 
         match_obj = JobMatch(
@@ -340,6 +341,8 @@ async def match_resume(
             strengths=match_data["strengths"],
             improvements=match_data["improvements"],
             summary=match_data["summary"],
+            strengths_breakdown=match_data.get("strengths_breakdown", {}),
+            jd_requirements=match_data.get("jd_requirements", {}),
             cover_letter=cover,
         )
         db.add(match_obj)
@@ -358,6 +361,8 @@ async def match_resume(
             strengths=m.strengths,
             improvements=m.improvements,
             summary=m.summary,
+            strengths_breakdown=m.strengths_breakdown,
+            jd_requirements=m.jd_requirements,
             cover_letter=m.cover_letter,
             apply_link=j.apply_link,
             matched_at=m.matched_at,
@@ -383,7 +388,8 @@ async def list_matches(
             job_title=j.title or "", company=j.company or "",
             location=j.location, ats_score=m.ats_score,
             strengths=m.strengths, improvements=m.improvements,
-            summary=m.summary, cover_letter=m.cover_letter,
+            summary=m.summary, strengths_breakdown=m.strengths_breakdown,
+            jd_requirements=m.jd_requirements, cover_letter=m.cover_letter,
             apply_link=j.apply_link, matched_at=m.matched_at,
         )
         for m, j in result.all()

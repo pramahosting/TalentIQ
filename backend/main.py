@@ -37,6 +37,20 @@ async def lifespan(app: FastAPI):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         print("  [OK] Tables ready.")
+
+        # Backfill tiq_jd_vendor_links from existing candidate submissions —
+        # this junction table didn't exist for earlier rows, and new rows
+        # already maintain it directly (see routers/candidatetrack.py). Safe
+        # to re-run every startup: ON CONFLICT DO NOTHING makes it a no-op
+        # once fully backfilled.
+        async with engine.begin() as conn:
+            await conn.execute(text("""
+                INSERT INTO tiq_jd_vendor_links (jd_id, vendor_id, first_linked_at)
+                SELECT DISTINCT jd_id, vendor_id, now() FROM tiq_tracked_candidates
+                ON CONFLICT (jd_id, vendor_id) DO NOTHING
+            """))
+        print("  [OK] JD-Vendor relationship table backfilled.")
+
         from db.seed_admin import seed
         await seed()
     except Exception as e:

@@ -136,7 +136,7 @@ body {
 .tiq-nav::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.28); }
 
 .tiq-nav-section {
-  font-size: 9px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 1px;
   text-transform: uppercase;

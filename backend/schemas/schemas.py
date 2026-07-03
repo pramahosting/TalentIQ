@@ -147,6 +147,8 @@ class JobMatchOut(BaseModel):
     strengths: Optional[List[str]] = None
     improvements: Optional[List[str]] = None
     summary: Optional[List[str]] = None
+    strengths_breakdown: Optional[dict] = None
+    jd_requirements: Optional[dict] = None
     cover_letter: Optional[str] = None
     apply_link: Optional[str] = None
     matched_at: datetime

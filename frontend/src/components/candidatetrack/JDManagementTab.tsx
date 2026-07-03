@@ -1,16 +1,29 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Edit2, Trash2 } from "lucide-react";
-import { candidateTrackApi } from "../../lib/api";
+import { Plus, Edit2, Trash2, Upload, FileText } from "lucide-react";
+import { candidateTrackApi, api } from "../../lib/api";
+import CsvImportModal from "./CsvImportModal";
 import DataTable from "../DataTable";
 
 const JD_STATUSES = ["Open", "Shortlisting", "Interviewing", "Offer Stage", "Closed"];
+
+async function openBlobInNewTab(url: string) {
+  try {
+    const res = await api.get(url, { responseType: "blob" });
+    const objectUrl = URL.createObjectURL(res.data);
+    window.open(objectUrl, "_blank");
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+  } catch {
+    alert("Could not load the file.");
+  }
+}
 
 function JDFormModal({ initial, clients, onClose, onSaved }: { initial?: any; clients: any[]; onClose: () => void; onSaved: () => void }) {
   const [jdTitle, setJdTitle] = useState(initial?.jd_title || "");
   const [clientId, setClientId] = useState(initial?.client_id ?? "");
   const [status, setStatus] = useState(initial?.status || "Open");
   const [description, setDescription] = useState(initial?.description || "");
+  const [jdFile, setJdFile] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -21,8 +34,17 @@ function JDFormModal({ initial, clients, onClose, onSaved }: { initial?: any; cl
     try {
       const payload: any = { jd_title: jdTitle, status, description };
       if (clientId) payload.client_id = Number(clientId);
+      let jdId = initial?.id;
       if (initial) await candidateTrackApi.updateJD(initial.id, payload);
-      else await candidateTrackApi.createJD(payload);
+      else {
+        const created = await candidateTrackApi.createJD(payload);
+        jdId = created.id;
+      }
+      if (jdFile && jdId) {
+        const form = new FormData();
+        form.append("file", jdFile);
+        await candidateTrackApi.uploadJDFile(jdId, form);
+      }
       onSaved();
       onClose();
     } catch (e: any) {
@@ -52,7 +74,7 @@ function JDFormModal({ initial, clients, onClose, onSaved }: { initial?: any; cl
           </select>
           {clients.length === 0 && (
             <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
-              No clients yet — add one in the Client Management tab to link this JD.
+              No clients yet — add one in the Clients tab to link this JD.
             </div>
           )}
         </div>
@@ -64,7 +86,19 @@ function JDFormModal({ initial, clients, onClose, onSaved }: { initial?: any; cl
         </div>
         <div className="tiq-form-group">
           <label className="tiq-label" style={{ color: "#374151" }}>Description</label>
-          <textarea className="tiq-input" style={{ minHeight: 100, resize: "vertical" }} value={description} onChange={e => setDescription(e.target.value)} />
+          <textarea className="tiq-input" style={{ minHeight: 100, resize: "vertical" }} value={description} onChange={e => setDescription(e.target.value)}
+            placeholder="Paste or type the JD text — used to extract Essential/Good to Have/Optional requirements automatically." />
+        </div>
+        <div className="tiq-form-group">
+          <label className="tiq-label" style={{ color: "#374151" }}>JD File (Word / PDF)</label>
+          <input type="file" accept=".pdf,.doc,.docx" onChange={e => setJdFile(e.target.files?.[0] || null)} />
+          {jdFile ? (
+            <div style={{ fontSize: 11, color: "var(--teal-500)", marginTop: 6 }}>{jdFile.name}</div>
+          ) : initial?.has_jd_file ? (
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
+              Current file: {initial.jd_file_filename}. Choose a new file to replace it.
+            </div>
+          ) : null}
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="tiq-btn tiq-btn-primary" onClick={handleSave} disabled={saving}>{saving ? "Saving…" : "Save"}</button>
@@ -80,6 +114,7 @@ export default function JDManagementTab() {
   const { data: jds = [] } = useQuery({ queryKey: ["ct-jds"], queryFn: candidateTrackApi.listJDs });
   const { data: clients = [] } = useQuery({ queryKey: ["ct-clients"], queryFn: candidateTrackApi.listClients });
   const [modalState, setModalState] = useState<null | { mode: "create" } | { mode: "edit"; jd: any }>(null);
+  const [csvImportOpen, setCsvImportOpen] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Array<number | string>>([]);
 
   const deleteMut = useMutation({
@@ -89,6 +124,7 @@ export default function JDManagementTab() {
   const bulkDeleteMut = useMutation({
     mutationFn: (ids: number[]) => candidateTrackApi.bulkDeleteJDs(ids),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["ct-jds"] }); setSelectedIds([]); },
+    onError: (e: any) => alert(`Bulk delete failed: ${e.response?.data?.detail || e.message}`),
   });
 
   const rows = jds.map((j: any) => ({
@@ -96,9 +132,9 @@ export default function JDManagementTab() {
     "JD Title": j.jd_title,
     "Client Name": j.company_name || "—",
     "Status": j.status,
-    "Shortlisted": j.shortlisted_count,
     "Vendors Involved": j.vendor_count,
     "Total Candidates": j.candidate_count,
+    "JD File": j.has_jd_file ? "Available" : "—",
     "Created On": j.created_at ? new Date(j.created_at).toLocaleDateString() : "",
     _raw: j,
   }));
@@ -114,22 +150,34 @@ export default function JDManagementTab() {
             </button>
           )}
         </div>
-        <button className="tiq-btn tiq-btn-primary" onClick={() => setModalState({ mode: "create" })}>
-          <Plus size={14} /> New JD
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="tiq-btn tiq-btn-outline" onClick={() => setCsvImportOpen(true)}>
+            <Upload size={14} /> Import CSV
+          </button>
+          <button className="tiq-btn tiq-btn-primary" onClick={() => setModalState({ mode: "create" })}>
+            <Plus size={14} /> New JD
+          </button>
+        </div>
       </div>
       <div className="tiq-card" style={{ padding: 0 }}>
         <DataTable
-          columns={["JD Title", "Client Name", "Status", "Shortlisted", "Vendors Involved", "Total Candidates", "Created On"]}
+          columns={["JD Title", "Client Name", "Status", "Vendors Involved", "Total Candidates", "JD File", "Created On"]}
           rows={rows}
           getRowKey={(row) => row.id}
           selectable
           selectedKeys={selectedIds}
           onSelectionChange={setSelectedIds}
           actionsLabel="Actions"
+          actionsWidth={150}
           emptyMessage="No JDs yet — create one to get started"
           renderActions={(row) => (
             <div style={{ display: "flex", gap: 4 }}>
+              {row._raw.has_jd_file && (
+                <button className="tiq-btn tiq-btn-outline tiq-btn-sm" title="View JD file"
+                  onClick={() => openBlobInNewTab(`/api/candidatetrack/jds/${row.id}/file`)}>
+                  <FileText size={12} />
+                </button>
+              )}
               <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => setModalState({ mode: "edit", jd: row._raw })}>
                 <Edit2 size={12} />
               </button>
@@ -147,6 +195,16 @@ export default function JDManagementTab() {
           clients={clients}
           onClose={() => setModalState(null)}
           onSaved={() => qc.invalidateQueries({ queryKey: ["ct-jds"] })}
+        />
+      )}
+      {csvImportOpen && (
+        <CsvImportModal
+          title="JDs"
+          columns={["jd_title", "client_name", "status", "description"]}
+          sampleRow={["Senior Data Engineer", "Acme Corp", "Open", "Own the data platform roadmap"]}
+          onImport={candidateTrackApi.importJDsCsv}
+          onClose={() => setCsvImportOpen(false)}
+          onDone={() => qc.invalidateQueries({ queryKey: ["ct-jds"] })}
         />
       )}
     </div>

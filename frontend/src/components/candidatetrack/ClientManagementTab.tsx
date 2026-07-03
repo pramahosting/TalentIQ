@@ -1,14 +1,14 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Edit2, Trash2 } from "lucide-react";
+import { Plus, Edit2, Trash2, Upload } from "lucide-react";
+import CsvImportModal from "./CsvImportModal";
 import { candidateTrackApi } from "../../lib/api";
 import DataTable from "../DataTable";
 
 function ClientFormModal({ initial, onClose, onSaved }: { initial?: any; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState(initial?.name || "");
-  const [location, setLocation] = useState(initial?.location || "");
+  const [address, setAddress] = useState(initial?.address || "");
   const [abn, setAbn] = useState(initial?.abn || "");
-  const [partnershipFrom, setPartnershipFrom] = useState(initial?.partnership_from || "");
   const [areaOfWork, setAreaOfWork] = useState(initial?.area_of_work || "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -18,7 +18,7 @@ function ClientFormModal({ initial, onClose, onSaved }: { initial?: any; onClose
     setSaving(true);
     setError("");
     try {
-      const payload = { name, location, abn, partnership_from: partnershipFrom || null, area_of_work: areaOfWork };
+      const payload = { name, address, abn, area_of_work: areaOfWork };
       if (initial) await candidateTrackApi.updateClient(initial.id, payload);
       else await candidateTrackApi.createClient(payload);
       onSaved();
@@ -44,23 +44,17 @@ function ClientFormModal({ initial, onClose, onSaved }: { initial?: any; onClose
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <div className="tiq-form-group">
-            <label className="tiq-label" style={{ color: "#374151" }}>Location</label>
-            <input className="tiq-input" value={location} onChange={e => setLocation(e.target.value)} />
+            <label className="tiq-label" style={{ color: "#374151" }}>Address</label>
+            <input className="tiq-input" value={address} onChange={e => setAddress(e.target.value)} />
           </div>
           <div className="tiq-form-group">
             <label className="tiq-label" style={{ color: "#374151" }}>ABN</label>
             <input className="tiq-input" value={abn} onChange={e => setAbn(e.target.value)} />
           </div>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <div className="tiq-form-group">
-            <label className="tiq-label" style={{ color: "#374151" }}>Partnership From</label>
-            <input type="date" className="tiq-input" value={partnershipFrom} onChange={e => setPartnershipFrom(e.target.value)} />
-          </div>
-          <div className="tiq-form-group">
-            <label className="tiq-label" style={{ color: "#374151" }}>Area of Work</label>
-            <input className="tiq-input" value={areaOfWork} onChange={e => setAreaOfWork(e.target.value)} placeholder="e.g. Banking, Insurance" />
-          </div>
+        <div className="tiq-form-group">
+          <label className="tiq-label" style={{ color: "#374151" }}>Area of Work</label>
+          <input className="tiq-input" value={areaOfWork} onChange={e => setAreaOfWork(e.target.value)} placeholder="e.g. Banking, Insurance" />
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="tiq-btn tiq-btn-primary" onClick={handleSave} disabled={saving}>{saving ? "Saving…" : "Save"}</button>
@@ -75,6 +69,7 @@ export default function ClientManagementTab() {
   const qc = useQueryClient();
   const { data: clients = [] } = useQuery({ queryKey: ["ct-clients"], queryFn: candidateTrackApi.listClients });
   const [modalState, setModalState] = useState<null | { mode: "create" } | { mode: "edit"; client: any }>(null);
+  const [csvImportOpen, setCsvImportOpen] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Array<number | string>>([]);
 
   const deleteMut = useMutation({
@@ -84,17 +79,16 @@ export default function ClientManagementTab() {
   const bulkDeleteMut = useMutation({
     mutationFn: (ids: number[]) => candidateTrackApi.bulkDeleteClients(ids),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["ct-clients"] }); setSelectedIds([]); },
+    onError: (e: any) => alert(`Bulk delete failed: ${e.response?.data?.detail || e.message}`),
   });
 
   const rows = clients.map((c: any) => ({
     id: c.id,
     "Name": c.name,
-    "Location": c.location || "—",
+    "Address": c.address || "—",
     "ABN": c.abn || "—",
-    "Partnership From": c.partnership_from || "—",
     "Area of Work": c.area_of_work || "—",
-    "Linked JDs": c.jd_count,
-    "Created": c.created_at ? new Date(c.created_at).toLocaleDateString() : "",
+    "Created On": c.created_at ? new Date(c.created_at).toLocaleDateString() : "",
     _raw: c,
   }));
 
@@ -109,13 +103,18 @@ export default function ClientManagementTab() {
             </button>
           )}
         </div>
-        <button className="tiq-btn tiq-btn-primary" onClick={() => setModalState({ mode: "create" })}>
-          <Plus size={14} /> New Client
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="tiq-btn tiq-btn-outline" onClick={() => setCsvImportOpen(true)}>
+            <Upload size={14} /> Import CSV
+          </button>
+          <button className="tiq-btn tiq-btn-primary" onClick={() => setModalState({ mode: "create" })}>
+            <Plus size={14} /> New Client
+          </button>
+        </div>
       </div>
       <div className="tiq-card" style={{ padding: 0 }}>
         <DataTable
-          columns={["Name", "Location", "ABN", "Partnership From", "Area of Work", "Linked JDs", "Created"]}
+          columns={["Name", "Address", "ABN", "Area of Work", "Created On"]}
           rows={rows}
           getRowKey={(row) => row.id}
           selectable
@@ -141,6 +140,16 @@ export default function ClientManagementTab() {
           initial={modalState.mode === "edit" ? modalState.client : undefined}
           onClose={() => setModalState(null)}
           onSaved={() => qc.invalidateQueries({ queryKey: ["ct-clients"] })}
+        />
+      )}
+      {csvImportOpen && (
+        <CsvImportModal
+          title="Clients"
+          columns={["name", "address", "abn", "area_of_work"]}
+          sampleRow={["Acme Corp", "Sydney NSW", "12345678901", "Banking"]}
+          onImport={candidateTrackApi.importClientsCsv}
+          onClose={() => setCsvImportOpen(false)}
+          onDone={() => qc.invalidateQueries({ queryKey: ["ct-clients"] })}
         />
       )}
     </div>

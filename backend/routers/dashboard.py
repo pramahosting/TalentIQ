@@ -6,7 +6,7 @@ CVAnalysis (session-only, no DB), and CandidateLens — for the user dashboard.
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, case
 
 from db.database import get_db
 from models.models import (
@@ -116,3 +116,123 @@ async def get_dashboard_stats(
         closed_jds=closed_jds,
         recent_activity=[],
     )
+
+
+@router.get("/jobhunter-summary")
+async def jobhunter_dashboard_summary(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Real-time, per-role breakdown of JobHunter activity — grouped by the
+    role searched for, since JobHunter has no client/vendor-style entity to
+    group by (search criteria is the natural dimension here)."""
+    uid = current_user.id
+
+    search_stmt = (
+        select(
+            func.coalesce(func.nullif(JobSearch.role, ""), "Unspecified").label("role"),
+            func.count(func.distinct(JobSearch.id)).label("total_searches"),
+            func.count(Job.id).label("total_jobs_found"),
+            func.max(JobSearch.searched_at).label("last_search"),
+        )
+        .select_from(JobSearch)
+        .outerjoin(Job, Job.search_id == JobSearch.id)
+        .where(JobSearch.user_id == uid)
+        .group_by(func.coalesce(func.nullif(JobSearch.role, ""), "Unspecified"))
+        .order_by(func.count(func.distinct(JobSearch.id)).desc())
+    )
+    search_rows = (await db.execute(search_stmt)).all()
+
+    match_stmt = (
+        select(
+            func.coalesce(func.nullif(JobSearch.role, ""), "Unspecified").label("role"),
+            func.count(JobMatch.id).label("total_matches"),
+            func.avg(JobMatch.ats_score).label("avg_score"),
+        )
+        .select_from(JobMatch)
+        .join(Job, JobMatch.job_id == Job.id)
+        .join(JobSearch, Job.search_id == JobSearch.id)
+        .where(JobMatch.user_id == uid)
+        .group_by(func.coalesce(func.nullif(JobSearch.role, ""), "Unspecified"))
+    )
+    match_by_role = {
+        r.role: {"total_matches": r.total_matches, "avg_score": round(r.avg_score, 1) if r.avg_score is not None else None}
+        for r in (await db.execute(match_stmt)).all()
+    }
+
+    return [
+        {
+            "role": r.role,
+            "total_searches": r.total_searches,
+            "total_jobs_found": r.total_jobs_found,
+            "total_matches": match_by_role.get(r.role, {}).get("total_matches", 0),
+            "avg_ats_score": match_by_role.get(r.role, {}).get("avg_score"),
+            "last_search": r.last_search.isoformat() if r.last_search else None,
+        }
+        for r in search_rows
+    ]
+
+
+@router.get("/marketintel-summary")
+async def marketintel_dashboard_summary(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Real-time, per-role breakdown of MarketIntel runs."""
+    uid = current_user.id
+    stmt = (
+        select(
+            func.coalesce(func.nullif(JobIntelRun.role, ""), "Unspecified").label("role"),
+            func.count(JobIntelRun.id).label("total_runs"),
+            func.sum(JobIntelRun.total_jobs_scraped).label("total_jobs_analyzed"),
+            func.max(JobIntelRun.created_at).label("last_run"),
+        )
+        .select_from(JobIntelRun)
+        .where(JobIntelRun.user_id == uid)
+        .group_by(func.coalesce(func.nullif(JobIntelRun.role, ""), "Unspecified"))
+        .order_by(func.count(JobIntelRun.id).desc())
+    )
+    rows = (await db.execute(stmt)).all()
+    return [
+        {
+            "role": r.role,
+            "total_runs": r.total_runs,
+            "total_jobs_analyzed": r.total_jobs_analyzed or 0,
+            "avg_jobs_per_run": round((r.total_jobs_analyzed or 0) / r.total_runs, 1) if r.total_runs else 0,
+            "last_run": r.last_run.isoformat() if r.last_run else None,
+        }
+        for r in rows
+    ]
+
+
+@router.get("/linkexplore-summary")
+async def linkexplore_dashboard_summary(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Real-time, per-job-title breakdown of LinkExplore searches."""
+    uid = current_user.id
+    stmt = (
+        select(
+            func.coalesce(func.nullif(LinkLensSearch.job_title, ""), "Unspecified").label("job_title"),
+            func.count(LinkLensSearch.id).label("total_searches"),
+            func.sum(LinkLensSearch.profiles_found).label("total_profiles"),
+            func.count(func.distinct(LinkLensSearch.country)).label("countries"),
+            func.max(LinkLensSearch.created_at).label("last_search"),
+        )
+        .select_from(LinkLensSearch)
+        .where(LinkLensSearch.user_id == uid)
+        .group_by(func.coalesce(func.nullif(LinkLensSearch.job_title, ""), "Unspecified"))
+        .order_by(func.count(LinkLensSearch.id).desc())
+    )
+    rows = (await db.execute(stmt)).all()
+    return [
+        {
+            "job_title": r.job_title,
+            "total_searches": r.total_searches,
+            "total_profiles": r.total_profiles or 0,
+            "countries": r.countries or 0,
+            "last_search": r.last_search.isoformat() if r.last_search else None,
+        }
+        for r in rows
+    ]

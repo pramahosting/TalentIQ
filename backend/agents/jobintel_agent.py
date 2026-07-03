@@ -12,6 +12,8 @@ from langchain_core.tools import Tool
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain_core.prompts import PromptTemplate
 
+from utils.credentials import DEFAULT_GROQ_MODEL
+
 try:
     from langchain_groq import ChatGroq
     _GROQ_AVAILABLE = True
@@ -214,7 +216,7 @@ def enrich_job_record(job: Dict) -> Dict:
 def build_jobintel_agent(groq_api_key: str) -> AgentExecutor:
     if not _GROQ_AVAILABLE or not ChatGroq:
         raise RuntimeError("langchain-groq is not installed. Run: pip install langchain-groq")
-    llm = ChatGroq(api_key=groq_api_key, model="llama3-70b-8192", temperature=0)
+    llm = ChatGroq(api_key=groq_api_key, model=DEFAULT_GROQ_MODEL, temperature=0)
 
     tools = [
         Tool(

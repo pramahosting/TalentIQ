@@ -11,6 +11,7 @@ import JDManagementTab from "../components/candidatetrack/JDManagementTab";
 import VendorManagementTab from "../components/candidatetrack/VendorManagementTab";
 import CandidateTrackingTab from "../components/candidatetrack/CandidateTrackingTab";
 import ClientManagementTab from "../components/candidatetrack/ClientManagementTab";
+import DataTable from "../components/DataTable";
 
 // Fetches a protected file (video/resume) via the authenticated axios
 // client — a plain <a href> wouldn't carry the Bearer token, since that's
@@ -530,9 +531,39 @@ type PopoverKind = "resume" | "matched" | "missing";
 type PopoverState = { kind: PopoverKind; x: number; y: number; width: number } | null;
 
 function CandidateRow({
-  c, rank, sessionId, lowT, highT, onRefresh, theadRef
-}: { c: any; rank: number; sessionId: number; lowT: number; highT: number; onRefresh: () => void; theadRef: React.RefObject<HTMLTableSectionElement> }) {
+  c, rank, sessionId, lowT, highT, onRefresh, theadRef, jdEssential, jdGoodToHave, jdOptional
+}: { c: any; rank: number; sessionId: number; lowT: number; highT: number; onRefresh: () => void; theadRef: React.RefObject<HTMLTableSectionElement>; jdEssential: string[]; jdGoodToHave: string[]; jdOptional: string[] }) {
   const [expanded, setExpanded] = useState(false);
+
+  // Categorize matched/missing skills by JD tier (Essential/Preferred/
+  // Optional) and, for matched skills, also by type (Technical/Business)
+  // using the candidate's strengths_breakdown — both lenses use data
+  // already extracted server-side, no new backend calls needed here.
+  const essentialSet = new Set((jdEssential || []).map(s => s.toLowerCase()));
+  const goodToHaveSet = new Set((jdGoodToHave || []).map(s => s.toLowerCase()));
+  const optionalSet = new Set((jdOptional || []).map(s => s.toLowerCase()));
+  const technicalList = (c.strengths_breakdown?.technicalSkills || []).map((s: string) => s.toLowerCase());
+  const businessList = (c.strengths_breakdown?.businessSkills || []).map((s: string) => s.toLowerCase());
+  const fuzzyIncludes = (list: string[], term: string) => list.some(t => t.includes(term) || term.includes(t));
+
+  const matchedByCategory: Record<string, string[]> = { Essential: [], Preferred: [], Technical: [], Business: [] };
+  (c.matched_skills || []).forEach((skill: string) => {
+    const s = skill.toLowerCase();
+    if (essentialSet.has(s)) matchedByCategory.Essential.push(skill);
+    else if (goodToHaveSet.has(s)) matchedByCategory.Preferred.push(skill);
+    if (fuzzyIncludes(technicalList, s)) matchedByCategory.Technical.push(skill);
+    else if (fuzzyIncludes(businessList, s)) matchedByCategory.Business.push(skill);
+  });
+
+  const missingByCategory: Record<string, string[]> = { Essential: [], Preferred: [], Optional: [] };
+  (c.missing_skills || []).forEach((skill: string) => {
+    const s = skill.toLowerCase();
+    if (essentialSet.has(s)) missingByCategory.Essential.push(skill);
+    else if (goodToHaveSet.has(s)) missingByCategory.Preferred.push(skill);
+    else if (optionalSet.has(s)) missingByCategory.Optional.push(skill);
+    else missingByCategory.Essential.push(skill); // fallback — shouldn't normally happen
+  });
+
   const [interviewOpen, setInterviewOpen] = useState(false);
   const [questions, setQuestions] = useState<string[]>(c.interview_questions || []);
   const [genLoading, setGenLoading] = useState(false);
@@ -608,7 +639,14 @@ function CandidateRow({
     });
   };
 
-  const resumeSummary: string[] = c.resume_summary || [];
+  const resumeSummary: { experience?: string[]; skills?: string[]; education?: string[]; achievements?: string[]; availability_work_rights?: string[] } = c.resume_summary || {};
+  const resumeSummaryFlat: string[] = [
+    ...(resumeSummary.experience || []),
+    ...(resumeSummary.skills || []),
+    ...(resumeSummary.education || []),
+    ...(resumeSummary.achievements || []),
+    ...(resumeSummary.availability_work_rights || []),
+  ];
 
   return (
     <>
@@ -622,19 +660,18 @@ function CandidateRow({
         <td style={{ fontSize: 12 }}>{c.phone}</td>
         <td style={{ fontSize: 12 }}>{c.source_vendor_name || "—"}</td>
 
-        {/* Resume Summary — 2 bullets visible, click for the full 10-statement list */}
+        {/* Resume Summary — top experience bullet + skills preview, click for the full categorized breakdown */}
         <td style={{ fontSize: 11, minWidth: 200 }}>
-          {resumeSummary.length > 0 ? (
+          {resumeSummaryFlat.length > 0 ? (
             <>
               <ul style={{ margin: 0, paddingLeft: 14 }}>
-                {resumeSummary.slice(0, 2).map((s, i) => <li key={i} style={{ marginBottom: 2 }}>{s}</li>)}
+                {(resumeSummary.experience || []).slice(0, 1).map((s, i) => <li key={`e${i}`} style={{ marginBottom: 2 }}>{s}</li>)}
+                {(resumeSummary.skills || []).slice(0, 1).map((s, i) => <li key={`s${i}`} style={{ marginBottom: 2 }}>{s}</li>)}
               </ul>
-              {resumeSummary.length > 2 && (
-                <button onClick={openPopover("resume")}
-                  style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", paddingLeft: 14, fontSize: 10, textDecoration: "underline" }}>
-                  +{resumeSummary.length - 2} more
-                </button>
-              )}
+              <button onClick={openPopover("resume")}
+                style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", paddingLeft: 14, fontSize: 10, textDecoration: "underline" }}>
+                View full summary
+              </button>
             </>
           ) : (
             <span style={{ color: "var(--text-muted)" }}>
@@ -649,32 +686,38 @@ function CandidateRow({
             color={c.ats_score >= highT ? "#10b981" : c.ats_score >= lowT ? "#f59e0b" : "#ef4444"} />
         </td>
 
-        {/* Key Strength = matched skills, bulleted, up to 5, rest via popover */}
-        <td style={{ fontSize: 11, minWidth: 150, color: "var(--teal-500)" }}>
-          <ul style={{ margin: 0, paddingLeft: 14 }}>
-            {(c.matched_skills || []).slice(0, 5).map((s: string) => (
-              <li key={s}>{s}</li>
-            ))}
-          </ul>
-          {(c.matched_skills || []).length > 5 && (
+        {/* Key Strength — categorized by JD tier (Essential/Preferred) and skill type (Technical/Business) */}
+        <td style={{ fontSize: 10, minWidth: 170, color: "var(--teal-500)" }}>
+          {(["Essential", "Preferred", "Technical", "Business"] as const).map(cat => matchedByCategory[cat].length > 0 && (
+            <div key={cat} style={{ marginBottom: 3 }}>
+              <span style={{ fontWeight: 700, fontSize: 9, textTransform: "uppercase" }}>{cat}: </span>
+              <span>{matchedByCategory[cat].slice(0, 3).join(", ")}{matchedByCategory[cat].length > 3 ? "…" : ""}</span>
+            </div>
+          ))}
+          {Object.values(matchedByCategory).every(v => v.length === 0) && (c.matched_skills || []).length === 0 && (
+            <span style={{ color: "var(--text-muted)" }}>—</span>
+          )}
+          {(c.matched_skills || []).length > 0 && (
             <button onClick={openPopover("matched")}
-              style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", paddingLeft: 14, fontSize: 10, textDecoration: "underline" }}>
-              +{c.matched_skills.length - 5} more
+              style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", fontSize: 9, textDecoration: "underline", padding: 0 }}>
+              View all ({c.matched_skills.length})
             </button>
           )}
         </td>
 
-        {/* Considerations = missing skills, bulleted, up to 5, rest via popover */}
-        <td style={{ fontSize: 11, minWidth: 150, color: "var(--rose-500)" }}>
-          <ul style={{ margin: 0, paddingLeft: 14 }}>
-            {(c.missing_skills || []).slice(0, 5).map((s: string) => (
-              <li key={s}>{s}</li>
-            ))}
-          </ul>
-          {(c.missing_skills || []).length > 5 && (
+        {/* Considerations — categorized by JD tier (Essential/Preferred/Optional) */}
+        <td style={{ fontSize: 10, minWidth: 170, color: "var(--rose-500)" }}>
+          {(["Essential", "Preferred", "Optional"] as const).map(cat => missingByCategory[cat].length > 0 && (
+            <div key={cat} style={{ marginBottom: 3 }}>
+              <span style={{ fontWeight: 700, fontSize: 9, textTransform: "uppercase" }}>{cat}: </span>
+              <span>{missingByCategory[cat].slice(0, 3).join(", ")}{missingByCategory[cat].length > 3 ? "…" : ""}</span>
+            </div>
+          ))}
+          {(c.missing_skills || []).length === 0 && <span style={{ color: "var(--text-muted)" }}>—</span>}
+          {(c.missing_skills || []).length > 0 && (
             <button onClick={openPopover("missing")}
-              style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", paddingLeft: 14, fontSize: 10, textDecoration: "underline" }}>
-              +{c.missing_skills.length - 5} more
+              style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", fontSize: 9, textDecoration: "underline", padding: 0 }}>
+              View all ({c.missing_skills.length})
             </button>
           )}
         </td>
@@ -839,6 +882,35 @@ function CandidateRow({
               </div>
             )}
 
+            {/* Categorized Strengths — Essential Matched, Technical, Business,
+                Soft Skills, Significant Experience, Certifications & Degrees */}
+            {c.strengths_breakdown && (
+              <div style={{ marginBottom: 16, paddingBottom: 14, borderBottom: "1px solid var(--border)" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 8 }}>
+                  Strengths Breakdown
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+                  {[
+                    ["Essential Matched", c.strengths_breakdown.essentialMatched, "#10b981"],
+                    ["Technical Skills", c.strengths_breakdown.technicalSkills, "#3b82f6"],
+                    ["Business Skills", c.strengths_breakdown.businessSkills, "#8b5cf6"],
+                    ["Soft Skills", c.strengths_breakdown.softSkills, "#ec4899"],
+                    ["Significant Experience", c.strengths_breakdown.significantExperience, "#f59e0b"],
+                    ["Certifications & Degrees", c.strengths_breakdown.certificationsDegrees, "#06b6d4"],
+                  ].map(([label, items, color]: any) => items?.length > 0 && (
+                    <div key={label}>
+                      <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color, marginBottom: 4 }}>{label}</div>
+                      <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                        {items.map((s: string, i: number) => (
+                          <li key={i} style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 3 }}>• {s}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 6 }}>
                 Interview Questions
@@ -885,33 +957,54 @@ function CandidateRow({
       )}
 
       {popover?.kind === "resume" && (
-        <AnchoredPopover x={popover.x} y={popover.y} width={popover.width} onClose={() => setPopover(null)}>
-          <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 8 }}>Full Resume Summary</div>
-          <ol style={{ margin: 0, paddingLeft: 16, fontSize: 11, lineHeight: 1.6 }}>
-            {resumeSummary.map((s, i) => <li key={i} style={{ marginBottom: 4 }}>{s}</li>)}
-          </ol>
+        <AnchoredPopover x={popover.x} y={popover.y} width={Math.max(popover.width, 320)} onClose={() => setPopover(null)}>
+          <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 10 }}>Full Resume Summary</div>
+          {([
+            ["Experience", resumeSummary.experience, "#f59e0b"],
+            ["Skills", resumeSummary.skills, "#3b82f6"],
+            ["Education", resumeSummary.education, "#06b6d4"],
+            ["Achievements", resumeSummary.achievements, "#10b981"],
+            ["Availability & Work Rights", resumeSummary.availability_work_rights, "#8b5cf6"],
+          ] as const).map(([label, items, color]) => items && items.length > 0 && (
+            <div key={label} style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color, marginBottom: 4 }}>{label}</div>
+              <ul style={{ margin: 0, paddingLeft: 16, fontSize: 11, lineHeight: 1.6 }}>
+                {items.map((s, i) => <li key={i} style={{ marginBottom: 3 }}>{s}</li>)}
+              </ul>
+            </div>
+          ))}
         </AnchoredPopover>
       )}
 
       {popover?.kind === "matched" && (
-        <AnchoredPopover x={popover.x} y={popover.y} width={popover.width} onClose={() => setPopover(null)}>
-          <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 8 }}>All Key Strengths</div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {(c.matched_skills || []).map((s: string) => (
-              <span key={s} style={{ background: "#0d9488", color: "#fff", fontSize: 10, padding: "3px 8px", borderRadius: 999 }}>{s}</span>
-            ))}
-          </div>
+        <AnchoredPopover x={popover.x} y={popover.y} width={Math.max(popover.width, 300)} onClose={() => setPopover(null)}>
+          <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 10 }}>All Key Strengths</div>
+          {(["Essential", "Preferred", "Technical", "Business"] as const).map(cat => matchedByCategory[cat].length > 0 && (
+            <div key={cat} style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 4 }}>{cat}</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {matchedByCategory[cat].map((s: string) => (
+                  <span key={s} style={{ background: "#0d9488", color: "#fff", fontSize: 10, padding: "3px 8px", borderRadius: 999 }}>{s}</span>
+                ))}
+              </div>
+            </div>
+          ))}
         </AnchoredPopover>
       )}
 
       {popover?.kind === "missing" && (
-        <AnchoredPopover x={popover.x} y={popover.y} width={popover.width} onClose={() => setPopover(null)}>
-          <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 8 }}>All Considerations</div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {(c.missing_skills || []).map((s: string) => (
-              <span key={s} style={{ background: "#e11d48", color: "#fff", fontSize: 10, padding: "3px 8px", borderRadius: 999 }}>{s}</span>
-            ))}
-          </div>
+        <AnchoredPopover x={popover.x} y={popover.y} width={Math.max(popover.width, 300)} onClose={() => setPopover(null)}>
+          <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 10 }}>All Considerations</div>
+          {(["Essential", "Preferred", "Optional"] as const).map(cat => missingByCategory[cat].length > 0 && (
+            <div key={cat} style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 4 }}>{cat}</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {missingByCategory[cat].map((s: string) => (
+                  <span key={s} style={{ background: "#e11d48", color: "#fff", fontSize: 10, padding: "3px 8px", borderRadius: 999 }}>{s}</span>
+                ))}
+              </div>
+            </div>
+          ))}
         </AnchoredPopover>
       )}
     </>
@@ -922,6 +1015,7 @@ function CandidateRow({
 export default function JobLensPage() {
     const qc = useQueryClient();
   const [jdText, setJdText] = useState("");
+  const [pasteTextOpen, setPasteTextOpen] = useState(false);
   const [jdFile, setJdFile] = useState<File | null>(null);
   const [cvFiles, setCvFiles] = useState<FileList | null>(null);
 
@@ -931,6 +1025,17 @@ export default function JobLensPage() {
   const [selectedJdRecordId, setSelectedJdRecordId] = useState<number | "">("");
   const [cvSource, setCvSource] = useState<"upload" | "vendor">("upload");
   const [selectedVendorCandidateIds, setSelectedVendorCandidateIds] = useState<number[]>([]);
+
+  // Bulk "Send to New Analysis" from Profile Management — jumps to the New
+  // Analysis tab with the JD and candidates pre-selected, same underlying
+  // flow as manually picking "From Vendor Management" there.
+  const handleSendToNewAnalysis = (jdId: number, candidateIds: number[]) => {
+    setJdSource("jdManagement");
+    setSelectedJdRecordId(jdId);
+    setCvSource("vendor");
+    setSelectedVendorCandidateIds(candidateIds);
+    setTab("new");
+  };
 
   const { data: jdOptions = [] } = useQuery({
     queryKey: ["joblens-jd-options"],
@@ -946,7 +1051,7 @@ export default function JobLensPage() {
   const [highT, setHighT] = useState(70);
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
   const [tab, setTab] = useState<"new"|"history"|"management">("new");
-  const [managementView, setManagementView] = useState<"clients"|"jds"|"vendors"|"tracking">("clients");
+  const [managementView, setManagementView] = useState<"tracking"|"clients"|"jds"|"vendors">("tracking");
   const jdFileRef = useRef<HTMLInputElement>(null);
   const cvFileRef = useRef<HTMLInputElement>(null);
   const theadRef = useRef<HTMLTableSectionElement>(null);
@@ -1043,9 +1148,9 @@ export default function JobLensPage() {
         <p className="tiq-page-sub">AI recruitment engine — rank CVs, score candidates, run video interviews</p>
       </div>
 
-      {/* Tabs row — session dropdown sits inline, right next to the Results tab */}
+      {/* Tabs row — session dropdown sits left-aligned on its own row below */}
       <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
           <div className="tiq-tabs">
             <button className={`tiq-tab${tab === "management" ? " active" : ""}`} onClick={() => setTab("management")}>
               <Building2 size={12} style={{ display: "inline", marginRight: 6 }} /> Management
@@ -1058,9 +1163,10 @@ export default function JobLensPage() {
               {sessions.length > 0 && <span className="tiq-badge tiq-badge-slate" style={{ marginLeft: 8, fontSize: 10 }}>{sessions.length}</span>}
             </button>
           </div>
+        </div>
 
-          {tab === "history" && sessions.length > 0 && (
-            <div style={{ display: "flex", alignItems: "center", gap: 8, maxWidth: 380, width: "100%" }}>
+        {tab === "history" && sessions.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, maxWidth: 380, width: "100%" }}>
             <HistoryDropdown
               value={activeSessionId}
               onChange={id => setActiveSessionId(id as number | null)}
@@ -1073,25 +1179,31 @@ export default function JobLensPage() {
               confirmDeleteMessage="Delete this session?"
             />
           </div>
-          )}
-        </div>
+        )}
 
         {tab === "management" && (
-          <select className="tiq-input" style={{ maxWidth: 260 }}
-            value={managementView}
-            onChange={e => setManagementView(e.target.value as typeof managementView)}>
-            <option value="clients">Client Management</option>
-            <option value="jds">JD Management</option>
-            <option value="vendors">Vendor Management</option>
-            <option value="tracking">Candidate Tracking</option>
-          </select>
+          <div>
+            <select className="tiq-input" style={{ maxWidth: 260 }}
+              value={managementView}
+              onChange={e => setManagementView(e.target.value as typeof managementView)}>
+              <option value="tracking">Candidates</option>
+              <option value="clients">Clients</option>
+              <option value="jds">Job Descriptions</option>
+              <option value="vendors">Vendors</option>
+            </select>
+            {managementView !== "tracking" && (
+              <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>
+                Reference data for Candidates — set these up first, then track candidates against them.
+              </div>
+            )}
+          </div>
         )}
       </div>
 
       {tab === "management" && managementView === "clients" && <ClientManagementTab />}
       {tab === "management" && managementView === "jds" && <JDManagementTab />}
       {tab === "management" && managementView === "vendors" && <VendorManagementTab />}
-      {tab === "management" && managementView === "tracking" && <CandidateTrackingTab />}
+      {tab === "management" && managementView === "tracking" && <CandidateTrackingTab onSendToNewAnalysis={handleSendToNewAnalysis} />}
 
       {tab === "new" && (
         <div style={{ maxWidth: 900 }}>
@@ -1130,17 +1242,7 @@ export default function JobLensPage() {
                 </div>
               ) : (
                 <>
-                  <textarea
-                    value={jdText}
-                    onChange={e => setJdText(e.target.value)}
-                    placeholder="Paste job description here..."
-                    style={{ width: "100%", minHeight: 200, padding: 10, fontSize: 12,
-                      fontFamily: "monospace", border: "1.5px solid var(--border)",
-                      borderRadius: 8, resize: "vertical", outline: "none",
-                      background: "var(--bg-secondary)", color: "var(--text-primary)" }}
-                  />
-                  <div style={{ marginTop: 10, fontSize: 12, color: "var(--text-muted)" }}>Or upload JD file:</div>
-                  <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                  <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
                     <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
                       onClick={() => jdFileRef.current?.click()}>
                       <Upload size={12} /> Upload JD
@@ -1149,6 +1251,24 @@ export default function JobLensPage() {
                   </div>
                   <input ref={jdFileRef} type="file" accept=".txt,.pdf,.doc,.docx" style={{ display: "none" }}
                     onChange={e => setJdFile(e.target.files?.[0] || null)} />
+
+                  <button type="button" onClick={() => setPasteTextOpen(o => !o)}
+                    style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 12, color: "var(--teal-500)", textDecoration: "underline", marginTop: 4 }}>
+                    {pasteTextOpen ? "Hide paste-text box ▲" : (jdText ? "Edit pasted text ▾" : "Or paste text instead ▾")}
+                  </button>
+
+                  {pasteTextOpen && (
+                    <textarea
+                      value={jdText}
+                      onChange={e => setJdText(e.target.value)}
+                      placeholder="Paste job description here..."
+                      autoFocus
+                      style={{ width: "100%", minHeight: 200, padding: 10, fontSize: 12, marginTop: 8,
+                        fontFamily: "monospace", border: "1.5px solid var(--border)",
+                        borderRadius: 8, resize: "vertical", outline: "none",
+                        background: "var(--bg-secondary)", color: "var(--text-primary)" }}
+                    />
+                  )}
                 </>
               )}
             </div>
@@ -1163,35 +1283,48 @@ export default function JobLensPage() {
                   <input type="radio" checked={cvSource === "upload"} onChange={() => setCvSource("upload")} />
                   Upload Files
                 </label>
-                <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: jdSource === "jdManagement" && selectedJdRecordId ? "pointer" : "not-allowed" }}>
-                  <input type="radio" checked={cvSource === "vendor"} disabled={!(jdSource === "jdManagement" && selectedJdRecordId)}
-                    onChange={() => setCvSource("vendor")} />
-                  From Vendor Management
+                <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
+                  <input type="radio" checked={cvSource === "vendor"}
+                    onChange={() => { setCvSource("vendor"); setJdSource("jdManagement"); }} />
+                  From Candidate Table
                 </label>
               </div>
 
               {cvSource === "vendor" ? (
                 <div style={{ marginBottom: 16 }}>
                   {!selectedJdRecordId ? (
-                    <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Select a JD (from JD Management) on the left first.</div>
+                    <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Select a JD from the dropdown on the left to load its candidates.</div>
                   ) : vendorCandidateOptions.length === 0 ? (
-                    <div style={{ fontSize: 12, color: "var(--text-muted)" }}>No vendor-submitted candidates for this JD yet.</div>
+                    <div style={{ fontSize: 12, color: "var(--text-muted)" }}>No open profiles for this JD — everyone submitted has already been shortlisted, selected, or offered.</div>
                   ) : (
-                    <div style={{ border: "1px solid var(--border)", borderRadius: 8, maxHeight: 220, overflowY: "auto", padding: 8 }}>
-                      {vendorCandidateOptions.map((vc: any) => (
-                        <label key={vc.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 4px", fontSize: 12, cursor: vc.has_resume ? "pointer" : "not-allowed", opacity: vc.has_resume ? 1 : 0.5 }}>
-                          <input type="checkbox" disabled={!vc.has_resume}
-                            checked={selectedVendorCandidateIds.includes(vc.id)}
-                            onChange={e => setSelectedVendorCandidateIds(prev => e.target.checked ? [...prev, vc.id] : prev.filter(id => id !== vc.id))} />
-                          <span style={{ flex: 1 }}>{vc.name}</span>
-                          <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{vc.vendor_name}</span>
-                          {!vc.has_resume && <span style={{ color: "var(--rose-500)", fontSize: 10 }}>No resume</span>}
-                        </label>
-                      ))}
-                    </div>
+                    <>
+                      <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 8 }}>
+                        Showing profiles not yet shortlisted, selected, or offered — check the header box to select all.
+                      </div>
+                      <div className="tiq-card" style={{ padding: 0, marginBottom: 8 }}>
+                        <DataTable
+                          columns={["Name", "Vendor", "Status", "Resume"]}
+                          rows={vendorCandidateOptions.map((vc: any) => ({
+                            id: vc.id,
+                            "Name": vc.name,
+                            "Vendor": vc.vendor_name || "—",
+                            "Status": vc.status,
+                            "Resume": vc.has_resume ? "Available" : "Missing",
+                            _raw: vc,
+                          }))}
+                          getRowKey={(row) => row.id}
+                          selectable
+                          selectedKeys={selectedVendorCandidateIds}
+                          onSelectionChange={(keys) => setSelectedVendorCandidateIds(
+                            (keys as number[]).filter(id => vendorCandidateOptions.find((vc: any) => vc.id === id)?.has_resume)
+                          )}
+                          emptyMessage="No profiles"
+                        />
+                      </div>
+                    </>
                   )}
                   {selectedVendorCandidateIds.length > 0 && (
-                    <div style={{ fontSize: 12, color: "var(--teal-500)", marginTop: 6, fontWeight: 600 }}>
+                    <div style={{ fontSize: 12, color: "var(--teal-500)", fontWeight: 600 }}>
                       {selectedVendorCandidateIds.length} candidate{selectedVendorCandidateIds.length > 1 ? "s" : ""} selected
                     </div>
                   )}
@@ -1413,6 +1546,9 @@ export default function JobLensPage() {
                           highT={activeSession.high_threshold}
                           onRefresh={refetchSession}
                           theadRef={theadRef}
+                          jdEssential={activeSession.jd_essential_skills || []}
+                          jdGoodToHave={activeSession.jd_good_to_have_skills || []}
+                          jdOptional={activeSession.jd_optional_skills || []}
                         />
                       ))}
                     </tbody>

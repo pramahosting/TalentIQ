@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 import {
@@ -51,12 +52,127 @@ const MODULES = [
   },
 ];
 
+const INDIVIDUAL_NAMES = ["CVAnalysis", "JobHunter"];
+const BUSINESS_NAMES = ["MarketIntel", "LinkExplore", "JD Creator", "CandidateLens"];
+
 const STATS = [
   { value: "6", label: "AI Modules" },
   { value: "100%", label: "Data Ownership" },
   { value: "∞", label: "Searches Saved" },
   { value: "AI", label: "LLM Powered" },
 ];
+
+function NavDropdown({ label, names }: { label: string; names: string[] }) {
+  const [open, setOpen] = useState(false);
+  const items = MODULES.filter(m => names.includes(m.name));
+  return (
+    <div style={{ position: "relative" }}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}>
+      <button style={{
+        fontSize: 13, color: "#64748b", padding: "6px 10px", borderRadius: 6,
+        fontWeight: 700, background: open ? "#f8fafc" : "transparent",
+        border: "none", cursor: "pointer", display: "flex", alignItems: "center", gap: 4,
+      }}>
+        {label}
+        <span style={{ fontSize: 9, transform: open ? "rotate(180deg)" : "none", transition: "transform .15s" }}>▾</span>
+      </button>
+      {open && (
+        <div style={{
+          position: "absolute", top: "100%", left: 0, marginTop: 4,
+          background: "#ffffff", borderRadius: 10, border: "1px solid #f1f5f9",
+          boxShadow: "0 12px 32px rgba(0,0,0,.12)", padding: 6, minWidth: 180, zIndex: 200,
+        }}>
+          {items.map(m => (
+            <Link key={m.name} to={m.route}
+              style={{ display: "block", fontSize: 13, color: "#374151", padding: "8px 10px", borderRadius: 6, textDecoration: "none", fontWeight: 500 }}
+              onMouseEnter={e => { e.currentTarget.style.background = "#f8fafc"; e.currentTarget.style.color = "#0f172a"; }}
+              onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "#374151"; }}>
+              {m.name}
+            </Link>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ModuleCard({ m, isEven }: { m: typeof MODULES[0]; isEven: boolean }) {
+  const Icon = m.icon;
+  return (
+    <div style={{
+      display: "grid", gridTemplateColumns: "1fr 1fr", gap: 64,
+      marginBottom: 80, alignItems: "center",
+      direction: isEven ? "ltr" : "rtl",
+    }}>
+      <div style={{ direction: "ltr" }}>
+        <div style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 16, padding: "6px 14px", borderRadius: 20, background: m.bg, border: `1px solid ${m.color}30` }}>
+          <Icon size={14} color={m.color} />
+          <span style={{ fontSize: 12, fontWeight: 700, color: m.color, textTransform: "uppercase", letterSpacing: ".5px" }}>{m.name}</span>
+        </div>
+        <h3 style={{ fontSize: "clamp(22px,3vw,32px)", fontWeight: 800, letterSpacing: "-.5px", marginBottom: 14, color: "#0f172a", lineHeight: 1.2 }}>{m.tagline}</h3>
+        <p style={{ fontSize: 16, color: "#64748b", lineHeight: 1.8, marginBottom: 28 }}>{m.desc}</p>
+        <ul style={{ listStyle: "none", padding: 0, margin: "0 0 32px" }}>
+          {m.features.map(f => (
+            <li key={f} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, fontSize: 14, color: "#374151" }}>
+              <CheckCircle size={15} color={m.color} style={{ flexShrink: 0 }} /> {f}
+            </li>
+          ))}
+        </ul>
+        <Link to="/register" style={{
+          display: "inline-flex", alignItems: "center", gap: 6,
+          padding: "10px 22px", borderRadius: 10, fontSize: 13, fontWeight: 600,
+          background: m.bg, border: `1.5px solid ${m.color}50`,
+          color: m.color, textDecoration: "none",
+        }}>
+          Try {m.name} <ArrowRight size={13} />
+        </Link>
+      </div>
+
+      {/* Visual card */}
+      <div style={{ direction: "ltr" }}>
+        <div style={{
+          background: "white", borderRadius: 20, padding: 28,
+          border: "1.5px solid #f1f5f9",
+          boxShadow: "0 8px 40px rgba(0,0,0,.08)",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24, paddingBottom: 20, borderBottom: "1px solid #f1f5f9" }}>
+            <div style={{ width: 44, height: 44, borderRadius: 12, background: m.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Icon size={22} color={m.color} />
+            </div>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: "#0f172a" }}>{m.name}</div>
+              <div style={{ fontSize: 12, color: "#94a3b8" }}>AI Module</div>
+            </div>
+            <div style={{ marginLeft: "auto", padding: "4px 12px", borderRadius: 20, background: "#f0fdf4", border: "1px solid #bbf7d0", fontSize: 11, color: "#16a34a", fontWeight: 700 }}>● Active</div>
+          </div>
+          {m.features.map((f, fi) => (
+            <div key={f} style={{
+              display: "flex", alignItems: "center", gap: 10, padding: "10px 12px",
+              background: fi % 2 === 0 ? "#f8fafc" : "transparent",
+              borderRadius: 8, marginBottom: 4, fontSize: 13, color: "#475569",
+            }}>
+              <div style={{ width: 6, height: 6, borderRadius: "50%", background: m.color, flexShrink: 0 }} />
+              {f}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ModuleGroupHeading({ label, sub, color }: { label: string; sub: string; color: string }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 14, margin: "0 0 40px" }}>
+      <div style={{ fontSize: "clamp(20px,2.6vw,28px)", fontWeight: 800, letterSpacing: "-.5px", color: "#0f172a" }}>{label}</div>
+      <div style={{ fontSize: 12, fontWeight: 700, color, background: `${color}15`, border: `1px solid ${color}30`, padding: "4px 12px", borderRadius: 20, textTransform: "uppercase", letterSpacing: ".05em" }}>
+        {sub}
+      </div>
+      <div style={{ flex: 1, height: 1, background: "#f1f5f9" }} />
+    </div>
+  );
+}
 
 export default function LandingPage() {
   const { user } = useAuth();
@@ -83,14 +199,8 @@ export default function LandingPage() {
         </div>
 
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          {MODULES.map(m => (
-            <Link key={m.name} to={m.route}
-              style={{ fontSize: 13, color: "#64748b", padding: "6px 10px", borderRadius: 6, textDecoration: "none", fontWeight: 500 }}
-              onMouseEnter={e => { e.currentTarget.style.color = "#0f172a"; e.currentTarget.style.background = "#f8fafc"; }}
-              onMouseLeave={e => { e.currentTarget.style.color = "#64748b"; e.currentTarget.style.background = "transparent"; }}>
-              {m.name}
-            </Link>
-          ))}
+          <NavDropdown label="Agents for Individual" names={INDIVIDUAL_NAMES} />
+          <NavDropdown label="Agents for Business" names={BUSINESS_NAMES} />
           <div style={{ width: 1, height: 20, background: "#e2e8f0", margin: "0 6px" }} />
           {isLoggedIn ? (
             <Link to="/app"
@@ -195,76 +305,20 @@ export default function LandingPage() {
           <h2 style={{ fontSize: "clamp(28px,4vw,44px)", fontWeight: 800, letterSpacing: "-1px", color: "#0f172a", marginBottom: 16 }}>
             Every tool you need to hire smarter
           </h2>
-          <p style={{ fontSize: 17, color: "#64748b", maxWidth: 520, margin: "0 auto" }}>
-            Each module is an independent AI agent. Use one or all six — they share the same database so your data compounds.
+          <p style={{ fontSize: 17, color: "#64748b", maxWidth: 560, margin: "0 auto" }}>
+            Each module is an independent AI agent, grouped below by <strong>Individual</strong> (personal job search) and <strong>Business</strong> (recruiting & talent ops) — they share the same database so your data compounds.
           </p>
         </div>
 
-        {MODULES.map((m, i) => {
-          const Icon = m.icon;
-          const isEven = i % 2 === 0;
-          return (
-            <div key={m.name} style={{
-              display: "grid", gridTemplateColumns: "1fr 1fr", gap: 64,
-              marginBottom: 80, alignItems: "center",
-              direction: isEven ? "ltr" : "rtl",
-            }}>
-              <div style={{ direction: "ltr" }}>
-                <div style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 16, padding: "6px 14px", borderRadius: 20, background: m.bg, border: `1px solid ${m.color}30` }}>
-                  <Icon size={14} color={m.color} />
-                  <span style={{ fontSize: 12, fontWeight: 700, color: m.color, textTransform: "uppercase", letterSpacing: ".5px" }}>{m.name}</span>
-                </div>
-                <h3 style={{ fontSize: "clamp(22px,3vw,32px)", fontWeight: 800, letterSpacing: "-.5px", marginBottom: 14, color: "#0f172a", lineHeight: 1.2 }}>{m.tagline}</h3>
-                <p style={{ fontSize: 16, color: "#64748b", lineHeight: 1.8, marginBottom: 28 }}>{m.desc}</p>
-                <ul style={{ listStyle: "none", padding: 0, margin: "0 0 32px" }}>
-                  {m.features.map(f => (
-                    <li key={f} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, fontSize: 14, color: "#374151" }}>
-                      <CheckCircle size={15} color={m.color} style={{ flexShrink: 0 }} /> {f}
-                    </li>
-                  ))}
-                </ul>
-                <Link to="/register" style={{
-                  display: "inline-flex", alignItems: "center", gap: 6,
-                  padding: "10px 22px", borderRadius: 10, fontSize: 13, fontWeight: 600,
-                  background: m.bg, border: `1.5px solid ${m.color}50`,
-                  color: m.color, textDecoration: "none",
-                }}>
-                  Try {m.name} <ArrowRight size={13} />
-                </Link>
-              </div>
+        <ModuleGroupHeading label="Individual" sub="Personal Job Search" color="#0ea5e9" />
+        {MODULES.filter(m => INDIVIDUAL_NAMES.includes(m.name))
+          .sort((a, b) => INDIVIDUAL_NAMES.indexOf(a.name) - INDIVIDUAL_NAMES.indexOf(b.name))
+          .map((m, i) => <ModuleCard key={m.name} m={m} isEven={i % 2 === 0} />)}
 
-              {/* Visual card */}
-              <div style={{ direction: "ltr" }}>
-                <div style={{
-                  background: "white", borderRadius: 20, padding: 28,
-                  border: "1.5px solid #f1f5f9",
-                  boxShadow: "0 8px 40px rgba(0,0,0,.08)",
-                }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24, paddingBottom: 20, borderBottom: "1px solid #f1f5f9" }}>
-                    <div style={{ width: 44, height: 44, borderRadius: 12, background: m.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                      <Icon size={22} color={m.color} />
-                    </div>
-                    <div>
-                      <div style={{ fontSize: 15, fontWeight: 700, color: "#0f172a" }}>{m.name}</div>
-                      <div style={{ fontSize: 12, color: "#94a3b8" }}>AI Module</div>
-                    </div>
-                    <div style={{ marginLeft: "auto", padding: "4px 12px", borderRadius: 20, background: "#f0fdf4", border: "1px solid #bbf7d0", fontSize: 11, color: "#16a34a", fontWeight: 700 }}>● Active</div>
-                  </div>
-                  {m.features.map((f, fi) => (
-                    <div key={f} style={{
-                      display: "flex", alignItems: "center", gap: 10, padding: "10px 12px",
-                      background: fi % 2 === 0 ? "#f8fafc" : "transparent",
-                      borderRadius: 8, marginBottom: 4, fontSize: 13, color: "#475569",
-                    }}>
-                      <div style={{ width: 6, height: 6, borderRadius: "50%", background: m.color, flexShrink: 0 }} />
-                      {f}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          );
-        })}
+        <ModuleGroupHeading label="Business" sub="Recruiting & Talent Ops" color="#fb923c" />
+        {MODULES.filter(m => BUSINESS_NAMES.includes(m.name))
+          .sort((a, b) => BUSINESS_NAMES.indexOf(a.name) - BUSINESS_NAMES.indexOf(b.name))
+          .map((m, i) => <ModuleCard key={m.name} m={m} isEven={i % 2 === 0} />)}
       </section>
 
       {/* ── WHY ── */}

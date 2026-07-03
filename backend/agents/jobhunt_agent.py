@@ -14,6 +14,8 @@ from langchain_core.tools import Tool
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain_core.prompts import PromptTemplate
 
+from utils.credentials import DEFAULT_GROQ_MODEL
+
 # langchain_groq is optional – fall back gracefully if not installed
 try:
     from langchain_groq import ChatGroq
@@ -258,121 +260,172 @@ _JOBHUNT_SKILL_BANK = [
 
 
 def _normalize_skill(s: str) -> str:
-    return re.sub(r"\s+", " ", s.strip().lower())
+    s = re.sub(r"\s+", " ", s.strip().lower())
+    for pattern, repl in _UK_TO_US_SPELLING:
+        s = re.sub(pattern, repl, s)
+    return s
 
 
-async def extract_candidate_profile(resume_text: str, groq_api_key: Optional[str] = None) -> Dict:
-    """Extract a structured candidate profile ONCE per resume — reused across
-    every job in a match batch rather than re-extracted per job."""
-    if groq_api_key and _GROQ_AVAILABLE and ChatGroq and len(resume_text) > 100:
-        try:
-            from langchain.schema import HumanMessage
-            llm = ChatGroq(api_key=groq_api_key, model="llama3-70b-8192", temperature=0.15)
-            prompt = f"""Extract this candidate's profile from their resume. Be factual — do
-not credit skills or experience the resume doesn't support.
-
-RESUME:
-\"\"\"{resume_text[:4000]}\"\"\"
-
-Return ONLY valid JSON, no markdown, no commentary:
-{{
-  "hard_skills": ["<skill>", ...],
-  "years_experience": <integer, best estimate>,
-  "education": "<highest qualification found, or empty string>"
-}}"""
-            resp = llm.invoke([HumanMessage(content=prompt)])
-            raw = resp.content.strip()
-            raw = re.sub(r"```(?:json)?|```", "", raw).strip()
-            data = json.loads(raw)
-            if data.get("hard_skills") is not None:
-                data["_ai_powered"] = True
-                return data
-        except Exception:
-            pass
-
-    text_lower = resume_text.lower()
-    found = [s for s in _JOBHUNT_SKILL_BANK if s in text_lower]
-    years_m = re.findall(r"(\d{1,2})\+?\s*(?:years?|yrs?)\s*(?:of\s+)?experience", text_lower)
-    years = max((int(y) for y in years_m), default=0)
-    edu_m = re.search(r"(bachelor'?s?|master'?s?|phd|degree|diploma)[^.\n]{0,80}", text_lower)
-    return {
-        "hard_skills": found,
-        "years_experience": years,
-        "education": edu_m.group().strip().capitalize() if edu_m else "",
-        "_ai_powered": False,
-    }
+def _normalize_text(s: str) -> str:
+    s = s.lower()
+    for pattern, repl in _UK_TO_US_SPELLING:
+        s = re.sub(pattern, repl, s)
+    return s
 
 
-async def _extract_job_requirements(job: Dict, groq_api_key: Optional[str] = None) -> Dict:
+_UK_TO_US_SPELLING = [
+    (r"\bmodelling\b", "modeling"), (r"\blabelling\b", "labeling"),
+    (r"\bcancelled\b", "canceled"), (r"\btravelling\b", "traveling"),
+    (r"\borganisation", "organization"), (r"\bcolour", "color"),
+    (r"\blicence", "license"), (r"\bcentre\b", "center"),
+    (r"\bprogramme\b", "program"), (r"\banalyse", "analyze"),
+    (r"\boptimise", "optimize"), (r"\bcategorise", "categorize"),
+    (r"\bcustomise", "customize"), (r"\bfavour", "favor"),
+    (r"\bbehaviour", "behavior"), (r"\bvisualise", "visualize"),
+    (r"\bsummarise", "summarize"), (r"\bspecialise", "specialize"),
+]
+
+# Same taxonomy used in CVAnalysis (routers/cvintel.py) and CandidateLens
+# (routers/joblens.py) — true synonyms/abbreviations plus curated specific-
+# technique -> general-skill relationships (e.g. Dimensional Modeling IS a
+# form of Data Modeling), not blind fuzzy string similarity, so it doesn't
+# introduce false positives.
+_SKILL_SYNONYMS = {
+    "ai": ["artificial intelligence"], "artificial intelligence": ["ai"],
+    "ml": ["machine learning"], "machine learning": ["ml",
+        "regression", "classification", "neural network", "deep learning",
+        "supervised learning", "unsupervised learning", "random forest",
+        "gradient boosting", "xgboost", "scikit-learn", "tensorflow", "pytorch"],
+    "bi": ["business intelligence"], "business intelligence": ["bi"],
+    "power bi": ["powerbi", "power-bi"],
+    "aws": ["amazon web services", "ec2", "s3", "redshift", "lambda",
+        "aws glue", "amazon redshift", "cloudformation"],
+    "amazon web services": ["aws"],
+    "azure": ["microsoft azure", "azure data factory", "azure synapse",
+        "azure synapse analytics", "adls", "adls gen2", "azure devops"],
+    "gcp": ["google cloud platform", "google cloud", "bigquery", "gcp bigquery"],
+    "google cloud platform": ["gcp"],
+    "api": ["apis", "application programming interface", "rest api", "restful api", "graphql"],
+    "apis": ["api"],
+    "etl": ["extract transform load", "extract, transform, load", "elt",
+        "data pipeline", "airflow", "dbt", "informatica", "talend", "ssis"],
+    "elt": ["etl"],
+    "data pipeline": ["etl", "elt", "airflow", "dbt", "data pipelines"],
+    "sql": ["structured query language", "t-sql", "pl/sql", "mysql", "postgresql", "postgres"],
+    "ci/cd": ["ci cd", "continuous integration", "continuous deployment", "jenkins", "github actions"],
+    "devops": ["dev ops"],
+    "nlp": ["natural language processing"], "natural language processing": ["nlp"],
+    "data governance": ["governance framework", "data governance framework",
+        "data stewardship", "data catalog", "data cataloguing", "data lineage",
+        "data quality framework", "collibra", "alation"],
+    "edw": ["enterprise data warehouse"], "enterprise data warehouse": ["edw"],
+    "mdm": ["master data management"], "master data management": ["mdm"],
+    "crm": ["customer relationship management", "salesforce"],
+    "erp": ["enterprise resource planning", "sap", "oracle erp", "netsuite"],
+    "data modeling": [
+        "dimensional modeling", "dimensional model", "data vault",
+        "data vault 2.0", "star schema", "snowflake schema",
+        "entity relationship modeling", "er modeling", "erd",
+        "third normal form", "3nf modeling", "kimball", "inmon",
+        "fsldm", "logical data modeling", "physical data modeling",
+        "conceptual data modeling", "normalization", "denormalization",
+    ],
+    "data architecture": [
+        "data mesh", "data fabric", "lakehouse", "data lakehouse",
+        "enterprise data warehouse", "edw", "data lake", "data warehouse",
+        "solution architecture", "enterprise architecture",
+    ],
+    "cloud architecture": ["aws", "azure", "gcp", "multi-cloud", "hybrid cloud"],
+}
+
+
+def _skill_present(skill: str, candidate_skills: set, resume_lower: str) -> bool:
+    """See routers/cvintel.py's _skill_present for the full rationale —
+    checks extracted-skill overlap, exact substring (after UK/US spelling
+    normalization), known synonyms/specific-technique relationships, and
+    (for multi-word skills) all significant words appearing anywhere in
+    the resume, not just as one exact contiguous phrase."""
+    sk = _normalize_skill(skill)
+    if any(sk in cs or cs in sk for cs in candidate_skills):
+        return True
+    if sk in resume_lower:
+        return True
+    for variant in _SKILL_SYNONYMS.get(sk, []):
+        if _normalize_text(variant) in resume_lower:
+            return True
+    words = [w for w in sk.split() if len(w) > 2]
+    if len(words) >= 2 and all(w in resume_lower for w in words):
+        return True
+    return False
+
+
+async def extract_candidate_profile(resume_text: str, groq_api_key: Optional[str] = None, groq_model: str = DEFAULT_GROQ_MODEL) -> Dict:
+    """Extract a structured, categorized candidate profile ONCE per resume
+    — reused across every job in a match batch rather than re-extracted
+    per job. Delegates to the shared extraction module (also used by
+    CVAnalysis and CandidateLens) so all three present strengths the same
+    way: Technical Skills, Business Skills, Soft Skills, Significant
+    Experience, and Certifications & Degrees."""
+    from utils.llm_extraction import extract_candidate_strengths_general
+    strengths = await extract_candidate_strengths_general(resume_text, groq_api_key, groq_model)
+    # hard_skills kept for backward-compat with the deterministic matching
+    # logic below — technical + business skills combined.
+    strengths["hard_skills"] = strengths.get("technical_skills", []) + strengths.get("business_skills", [])
+    strengths["_ai_powered"] = strengths.get("ai_powered", False)
+    return strengths
+
+
+async def _extract_job_requirements(job: Dict, groq_api_key: Optional[str] = None, groq_model: str = DEFAULT_GROQ_MODEL) -> Dict:
+    """Categorized JD requirements (Essential / Good to Have / Optional) via
+    the shared extraction module — same schema CVAnalysis and CandidateLens
+    use, so "similar and essential, preferred requirements from the JD" show
+    up consistently everywhere."""
+    from utils.llm_extraction import extract_jd_requirements_categorized
     description = job.get("description", "") or ""
-    if groq_api_key and _GROQ_AVAILABLE and ChatGroq and len(description) > 60:
-        try:
-            from langchain.schema import HumanMessage
-            llm = ChatGroq(api_key=groq_api_key, model="llama3-70b-8192", temperature=0.1)
-            prompt = f"""Extract requirements from this job description. Don't invent
-requirements that aren't stated or clearly implied.
-
-JOB TITLE: {job.get('title', '')}
-DESCRIPTION:
-\"\"\"{description[:2500]}\"\"\"
-
-Return ONLY valid JSON, no markdown, no commentary:
-{{
-  "required_hard_skills": ["<skill>", ...],
-  "min_years_experience": <integer, 0 if not stated>,
-  "education_requirement": "<short phrase, or empty string>"
-}}"""
-            resp = llm.invoke([HumanMessage(content=prompt)])
-            raw = resp.content.strip()
-            raw = re.sub(r"```(?:json)?|```", "", raw).strip()
-            data = json.loads(raw)
-            if data.get("required_hard_skills"):
-                return data
-        except Exception:
-            pass
-
-    desc_lower = description.lower()
-    found = [s for s in _JOBHUNT_SKILL_BANK if s in desc_lower]
-    years_m = re.search(r"(\d{1,2})\+?\s*(?:years?|yrs?)\s*(?:of\s+)?experience", desc_lower)
-    edu_m = re.search(r"(bachelor'?s?|master'?s?|phd|degree|diploma)[^.\n]{0,80}", desc_lower)
-    return {
-        "required_hard_skills": found or [r for r in extract_requirements_from_description(description)][:10],
-        "min_years_experience": int(years_m.group(1)) if years_m else 0,
-        "education_requirement": edu_m.group().strip().capitalize() if edu_m else "",
-    }
+    req = await extract_jd_requirements_categorized(description, groq_api_key, groq_model)
+    # required_hard_skills kept for backward-compat with the deterministic
+    # matching logic below — falls back to the old heuristic extractor if
+    # the shared one came back empty (e.g. a very short description).
+    if not req.get("essential") and not req.get("good_to_have"):
+        req["required_hard_skills"] = extract_requirements_from_description(description)[:10]
+    else:
+        req["required_hard_skills"] = req.get("essential", [])
+    return req
 
 
 async def calculate_match(
     resume_text: str, job: Dict, groq_api_key: Optional[str] = None,
-    candidate_profile: Optional[Dict] = None,
+    candidate_profile: Optional[Dict] = None, groq_model: str = DEFAULT_GROQ_MODEL,
 ) -> Dict:
     """Calculate ATS score and generate insights for a single job.
     Pass a pre-extracted `candidate_profile` (from extract_candidate_profile)
     when matching one resume against many jobs, to avoid re-extracting the
     same resume on every call."""
     if candidate_profile is None:
-        candidate_profile = await extract_candidate_profile(resume_text, groq_api_key)
+        candidate_profile = await extract_candidate_profile(resume_text, groq_api_key, groq_model)
 
-    requirements = await _extract_job_requirements(job, groq_api_key)
-    text_lower = resume_text.lower()
+    requirements = await _extract_job_requirements(job, groq_api_key, groq_model)
+    text_lower = _normalize_text(resume_text)
     candidate_skills = {_normalize_skill(s) for s in candidate_profile.get("hard_skills", [])}
 
-    required = [_normalize_skill(s) for s in requirements.get("required_hard_skills", []) if s]
-    matched = [s for s in required if any(s in cs or cs in s for cs in candidate_skills) or s in text_lower]
-    missed = [s for s in required if s not in matched]
+    essential = [_normalize_skill(s) for s in requirements.get("essential", requirements.get("required_hard_skills", [])) if s]
+    good_to_have = [_normalize_skill(s) for s in requirements.get("good_to_have", []) if s]
+    matched = [s for s in essential if _skill_present(s, candidate_skills, text_lower)]
+    missed = [s for s in essential if s not in matched]
+    matched_good = [s for s in good_to_have if _skill_present(s, candidate_skills, text_lower)]
 
-    skills_pct = round(len(matched) / len(required) * 100) if required else 65
+    skills_pct = round(len(matched) / len(essential) * 100) if essential else 65
 
     min_years = requirements.get("min_years_experience") or 0
     cand_years = candidate_profile.get("years_experience") or 0
     experience_pct = 85 if min_years <= 0 else max(20, min(100, round(cand_years / min_years * 100)))
 
-    ats_score = round(skills_pct * 0.65 + experience_pct * 0.25 + 75 * 0.10, 1)
+    ats_score = round(skills_pct * 0.60 + experience_pct * 0.25 + (min(100, len(matched_good) * 25) if good_to_have else 60) * 0.10 + 75 * 0.05, 1)
     ats_score = max(10, min(98, ats_score))
 
     summary = [
         f"ATS match score: {ats_score}%",
-        f"Matched {len(matched)} of {len(required)} extracted requirements.",
+        f"Matched {len(matched)} of {len(essential)} essential requirements.",
     ]
     if missed:
         summary.append(f"Gaps: {', '.join(missed[:3])}")
@@ -382,6 +435,23 @@ async def calculate_match(
         "strengths": [s.title() for s in matched][:8],
         "improvements": [s.title() for s in missed][:5],
         "summary": summary,
+        # ── Categorized strengths — same schema as CVAnalysis/CandidateLens ──
+        "strengths_breakdown": {
+            "essential_matched": [s.title() for s in matched],
+            "technical_skills": candidate_profile.get("technical_skills", []),
+            "business_skills": candidate_profile.get("business_skills", []),
+            "soft_skills": candidate_profile.get("soft_skills", []),
+            "significant_experience": candidate_profile.get("significant_experience", []),
+            "certifications_degrees": candidate_profile.get("certifications_degrees", []),
+        },
+        # ── Categorized JD requirements ──
+        "jd_requirements": {
+            "essential": requirements.get("essential", requirements.get("required_hard_skills", [])),
+            "good_to_have": requirements.get("good_to_have", []),
+            "optional": requirements.get("optional", []),
+            "min_years_experience": requirements.get("min_years_experience", 0),
+            "education_requirement": requirements.get("education_requirement", ""),
+        },
     }
 
 
@@ -399,6 +469,7 @@ def generate_cover_letter(
     resume_info: Dict,
     job: Dict,
     groq_api_key: Optional[str] = None,
+    groq_model: str = DEFAULT_GROQ_MODEL,
 ) -> str:
     """Generate a personalised cover letter for a job"""
     job_title = job.get("title", "the position")
@@ -409,7 +480,7 @@ def generate_cover_letter(
     # Use LLM if available
     if groq_api_key and _GROQ_AVAILABLE and ChatGroq:
         try:
-            llm = ChatGroq(api_key=groq_api_key, model="llama3-70b-8192", temperature=0.5)
+            llm = ChatGroq(api_key=groq_api_key, model=groq_model, temperature=0.5)
             prompt = (
                 f"Write a professional, concise cover letter for {candidate_name} "
                 f"applying for the {job_title} role at {company}.\n\n"
@@ -462,7 +533,7 @@ def build_jobhunt_agent(groq_api_key: str) -> AgentExecutor:
     """Build a LangChain ReAct agent wrapping JobHunt tools"""
     if not _GROQ_AVAILABLE or not ChatGroq:
         raise RuntimeError("langchain-groq is not installed. Run: pip install langchain-groq")
-    llm = ChatGroq(api_key=groq_api_key, model="llama3-70b-8192", temperature=0)
+    llm = ChatGroq(api_key=groq_api_key, model=DEFAULT_GROQ_MODEL, temperature=0)
 
     tools = [
         Tool(

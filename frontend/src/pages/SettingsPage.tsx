@@ -38,7 +38,7 @@ export default function SettingsPage() {
 
   // Each service stores its fields independently
   const [adzuna, setAdzuna] = useState({ app_id: "", app_key: "" });
-  const [groq, setGroq] = useState({ api_key: "" });
+  const [groq, setGroq] = useState({ api_key: "", model: "" });
   const [linkedin, setLinkedin] = useState({ email: "", password: "" });
   const [smtp, setSmtp] = useState({ host: "", port: "587", username: "", password: "", from_email: "" });
   const [ollama, setOllama] = useState({ base_url: "http://localhost:11434", model: "llama3" });
@@ -49,6 +49,8 @@ export default function SettingsPage() {
 
   const [savingService, setSavingService] = useState("");
   const isAdmin = user?.role === "admin";
+  const { data: globalKeys = [] } = useQuery({ queryKey: ["global-keys"], queryFn: authApi.listGlobalKeys });
+  const globalServiceSet = new Set(globalKeys.map((k: any) => k.service));
   const SHAREABLE = ["groq", "ollama", "adzuna"];
   const [globalToggle, setGlobalToggle] = useState<Record<string, boolean>>({});
 
@@ -173,34 +175,49 @@ export default function SettingsPage() {
         <div style={{ maxWidth: 680 }}>
           {keyMsg && <div className="tiq-alert tiq-alert-success tiq-mb-4">{keyMsg}</div>}
 
-          {/* ADZUNA */}
-          <div className="tiq-card tiq-mb-6">
-            <div className="tiq-card-title">Adzuna — Job Search API</div>
-            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
-              Free at <a href="https://developer.adzuna.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>developer.adzuna.com</a>. Needed for JobHunt and JobIntel agents.
-            </p>
-            <div className="tiq-grid-2">
-              {inp("App ID", adzuna.app_id, v => setAdzuna(a => ({ ...a, app_id: v })), "text", "e.g. 638c0962")}
-              {inp("App Key", adzuna.app_key, v => setAdzuna(a => ({ ...a, app_key: v })), "password", "e.g. 04681adc…")}
+          {/* ADZUNA / GROQ / OLLAMA — admin-managed only. These three are
+              platform-shared credentials (see utils/credentials.py
+              SHAREABLE_SERVICES); every user already inherits whatever the
+              admin configures here, so only admins get the editable form —
+              everyone else sees a simple status readout instead. */}
+          {isAdmin ? (
+            <div className="tiq-card tiq-mb-6">
+              <div className="tiq-card-title">Adzuna — Job Search API</div>
+              <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
+                Free at <a href="https://developer.adzuna.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>developer.adzuna.com</a>. Needed for JobHunt and JobIntel agents.
+              </p>
+              <div className="tiq-grid-2">
+                {inp("App ID", adzuna.app_id, v => setAdzuna(a => ({ ...a, app_id: v })), "text", "e.g. 638c0962")}
+                {inp("App Key", adzuna.app_key, v => setAdzuna(a => ({ ...a, app_key: v })), "password", "e.g. 04681adc…")}
+              </div>
+              {globalCheckbox("adzuna")}
+              <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("adzuna", adzuna)} disabled={savingService === "adzuna"}>
+                {savingService === "adzuna" ? "Saving…" : "Save Adzuna Keys"}
+              </button>
             </div>
-            {globalCheckbox("adzuna")}
-            <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("adzuna", adzuna)} disabled={savingService === "adzuna"}>
-              {savingService === "adzuna" ? "Saving…" : "Save Adzuna Keys"}
-            </button>
-          </div>
+          ) : null}
 
-          {/* GROQ */}
-          <div className="tiq-card tiq-mb-6">
-            <div className="tiq-card-title">Groq — AI / LLM API</div>
-            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
-              Free at <a href="https://console.groq.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>console.groq.com</a>. Enables AI resume matching and cover letter generation.
-            </p>
-            {inp("API Key", groq.api_key, v => setGroq({ api_key: v }), "password", "gsk_…")}
-            {globalCheckbox("groq")}
-            <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("groq", groq)} disabled={savingService === "groq"}>
-              {savingService === "groq" ? "Saving…" : "Save Groq Key"}
-            </button>
-          </div>
+          {isAdmin ? (
+            <div className="tiq-card tiq-mb-6">
+              <div className="tiq-card-title">Groq — AI / LLM API</div>
+              <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
+                Free at <a href="https://console.groq.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>console.groq.com</a>. Enables AI resume matching and cover letter generation.
+              </p>
+              {inp("API Key", groq.api_key, v => setGroq(g => ({ ...g, api_key: v })), "password", "gsk_…")}
+              {inp("Model", groq.model, v => setGroq(g => ({ ...g, model: v })), "text", "e.g. openai/gpt-oss-120b")}
+              <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: -6, marginBottom: 10 }}>
+                Leave blank to use the platform default. See{" "}
+                <a href="https://console.groq.com/docs/models" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>
+                  console.groq.com/docs/models
+                </a>{" "}
+                for currently supported models — Groq periodically retires older ones.
+              </p>
+              {globalCheckbox("groq")}
+              <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("groq", groq)} disabled={savingService === "groq"}>
+                {savingService === "groq" ? "Saving…" : "Save Groq Key"}
+              </button>
+            </div>
+          ) : null}
 
           {/* LINKEDIN */}
           <div className="tiq-card tiq-mb-6">
@@ -217,23 +234,52 @@ export default function SettingsPage() {
             </button>
           </div>
 
-          {/* OLLAMA */}
-          <div className="tiq-card tiq-mb-6">
-            <div className="tiq-card-title">Ollama — Local/Self-Hosted LLM</div>
-            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
-              Used as a fallback for JD Creator when no Groq key is set. Requires{" "}
-              <a href="https://ollama.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>Ollama</a>{" "}
-              running locally (or reachable at the URL below) with a model pulled, e.g. <code>ollama pull llama3</code>.
-            </p>
-            <div className="tiq-grid-2">
-              {inp("Base URL", ollama.base_url, v => setOllama(o => ({ ...o, base_url: v })), "text", "http://localhost:11434")}
-              {inp("Model", ollama.model, v => setOllama(o => ({ ...o, model: v })), "text", "llama3")}
+          {isAdmin ? (
+            <div className="tiq-card tiq-mb-6">
+              <div className="tiq-card-title">Ollama — Local/Self-Hosted LLM</div>
+              <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
+                Used as a fallback for JD Creator when no Groq key is set. Requires{" "}
+                <a href="https://ollama.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>Ollama</a>{" "}
+                running locally (or reachable at the URL below) with a model pulled, e.g. <code>ollama pull llama3</code>.
+              </p>
+              <div className="tiq-grid-2">
+                {inp("Base URL", ollama.base_url, v => setOllama(o => ({ ...o, base_url: v })), "text", "http://localhost:11434")}
+                {inp("Model", ollama.model, v => setOllama(o => ({ ...o, model: v })), "text", "llama3")}
+              </div>
+              {globalCheckbox("ollama")}
+              <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("ollama", ollama)} disabled={savingService === "ollama"}>
+                {savingService === "ollama" ? "Saving…" : "Save Ollama Settings"}
+              </button>
             </div>
-            {globalCheckbox("ollama")}
-            <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("ollama", ollama)} disabled={savingService === "ollama"}>
-              {savingService === "ollama" ? "Saving…" : "Save Ollama Settings"}
-            </button>
-          </div>
+          ) : (
+            <div className="tiq-card tiq-mb-6">
+              <div className="tiq-card-title">Platform AI & Search Services</div>
+              <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
+                Adzuna, Groq, and Ollama are configured platform-wide by your administrator — every feature that
+                uses them (resume summaries, JD skill extraction, interview questions, CVAnalysis scoring, job
+                search, and more) automatically uses whatever is set up here, no action needed from you.
+              </p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {[
+                  { key: "adzuna", label: "Adzuna (job search)" },
+                  { key: "groq", label: "Groq (AI / LLM)" },
+                  { key: "ollama", label: "Ollama (local LLM fallback)" },
+                ].map(({ key, label }) => (
+                  <div key={key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+                    <span style={{
+                      width: 8, height: 8, borderRadius: "50%",
+                      background: globalServiceSet.has(key) ? "#10b981" : "#d1d5db",
+                      flexShrink: 0,
+                    }} />
+                    <span>{label}</span>
+                    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                      {globalServiceSet.has(key) ? "Configured" : "Not yet configured"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* MORPHCAST */}
           <div className="tiq-card tiq-mb-6">

@@ -355,6 +355,56 @@ export default function JobHunterPage() {
                     </div>
                   </div>
 
+                  {m.strengths_breakdown && (
+                    <details style={{ marginTop: 8, marginBottom: 8 }}>
+                      <summary style={{ fontSize: 13, fontWeight: 600, cursor: "pointer", color: "var(--teal-500)", marginBottom: 8 }}>
+                        View full strengths & requirements breakdown
+                      </summary>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 10 }}>
+                        <div>
+                          {[
+                            ["Essential Matched", m.strengths_breakdown.essential_matched, "#10b981"],
+                            ["Technical Skills", m.strengths_breakdown.technical_skills, "#3b82f6"],
+                            ["Business Skills", m.strengths_breakdown.business_skills, "#8b5cf6"],
+                            ["Soft Skills", m.strengths_breakdown.soft_skills, "#ec4899"],
+                            ["Significant Experience", m.strengths_breakdown.significant_experience, "#f59e0b"],
+                            ["Certifications & Degrees", m.strengths_breakdown.certifications_degrees, "#06b6d4"],
+                          ].map(([label, items, color]: any) => items?.length > 0 && (
+                            <div key={label} style={{ marginBottom: 10 }}>
+                              <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color, marginBottom: 4 }}>{label}</div>
+                              <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                                {items.map((s: string, i: number) => (
+                                  <li key={i} style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 3 }}>• {s}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          ))}
+                        </div>
+                        {m.jd_requirements && (
+                          <div>
+                            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", marginBottom: 8 }}>
+                              JD Requirements
+                            </div>
+                            {[
+                              ["Essential", m.jd_requirements.essential, "#ef4444"],
+                              ["Good to Have", m.jd_requirements.good_to_have, "#f59e0b"],
+                              ["Optional", m.jd_requirements.optional, "var(--text-muted)"],
+                            ].map(([label, items, color]: any) => items?.length > 0 && (
+                              <div key={label} style={{ marginBottom: 10 }}>
+                                <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color, marginBottom: 4 }}>{label}</div>
+                                <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                                  {items.map((s: string) => (
+                                    <span key={s} className="tiq-badge" style={{ fontSize: 10, background: `${color}20`, color }}>{s}</span>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </details>
+                  )}
+
                   {m.cover_letter && (
                     <details style={{ marginTop: 8 }}>
                       <summary style={{ fontSize: 13, fontWeight: 600, cursor: "pointer", color: "var(--teal-500)", marginBottom: 8 }}>

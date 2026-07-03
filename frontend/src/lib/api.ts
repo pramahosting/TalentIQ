@@ -31,6 +31,7 @@ export const authApi = {
   changePassword: (old_pw: string, new_pw: string) =>
     api.post(`/api/auth/change-password?old_password=${encodeURIComponent(old_pw)}&new_password=${encodeURIComponent(new_pw)}`).then((r) => r.data),
   listApiKeys: () => api.get("/api/auth/api-keys").then((r) => r.data),
+  listGlobalKeys: () => api.get("/api/auth/global-keys").then((r) => r.data),
   saveApiKey: (data: any) => api.post("/api/auth/api-keys", data).then((r) => r.data),
   deleteApiKey: (id: number) => api.delete(`/api/auth/api-keys/${id}`).then((r) => r.data),
   listUsers: () => api.get("/api/auth/users").then((r) => r.data),
@@ -75,6 +76,9 @@ export const linklensApi = {
 
 export const dashboardApi = {
   getStats: () => api.get("/api/dashboard/stats").then((r) => r.data),
+  jobHunterSummary: () => api.get("/api/dashboard/jobhunter-summary").then((r) => r.data),
+  marketIntelSummary: () => api.get("/api/dashboard/marketintel-summary").then((r) => r.data),
+  linkExploreSummary: () => api.get("/api/dashboard/linkexplore-summary").then((r) => r.data),
 };
 
 export function downloadBlob(blob: Blob, filename: string) {
@@ -115,19 +119,25 @@ export const candidateTrackApi = {
   updateClient: (id: number, data: any) => api.put(`/api/candidatetrack/clients/${id}`, data).then(r => r.data),
   deleteClient: (id: number) => api.delete(`/api/candidatetrack/clients/${id}`).then(r => r.data),
   bulkDeleteClients: (ids: number[]) => api.delete("/api/candidatetrack/clients", { data: { ids } }).then(r => r.data),
+  importClientsCsv: (form: FormData) => api.post("/api/candidatetrack/clients/import-csv", form, { headers: { "Content-Type": "multipart/form-data" } }).then(r => r.data),
 
   listJDs: () => api.get("/api/candidatetrack/jds").then(r => r.data),
   jdStats: () => api.get("/api/candidatetrack/jds/stats").then(r => r.data),
+  jdDashboardSummary: () => api.get("/api/candidatetrack/dashboard/jd-summary").then(r => r.data),
+  vendorDashboardSummary: () => api.get("/api/candidatetrack/dashboard/vendor-summary").then(r => r.data),
   createJD: (data: any) => api.post("/api/candidatetrack/jds", data).then(r => r.data),
   updateJD: (id: number, data: any) => api.put(`/api/candidatetrack/jds/${id}`, data).then(r => r.data),
   deleteJD: (id: number) => api.delete(`/api/candidatetrack/jds/${id}`).then(r => r.data),
   bulkDeleteJDs: (ids: number[]) => api.delete("/api/candidatetrack/jds", { data: { ids } }).then(r => r.data),
+  importJDsCsv: (form: FormData) => api.post("/api/candidatetrack/jds/import-csv", form, { headers: { "Content-Type": "multipart/form-data" } }).then(r => r.data),
+  uploadJDFile: (jdId: number, form: FormData) => api.post(`/api/candidatetrack/jds/${jdId}/file`, form, { headers: { "Content-Type": "multipart/form-data" } }).then(r => r.data),
 
   listVendors: () => api.get("/api/candidatetrack/vendors").then(r => r.data),
   createVendor: (data: any) => api.post("/api/candidatetrack/vendors", data).then(r => r.data),
   updateVendor: (id: number, data: any) => api.put(`/api/candidatetrack/vendors/${id}`, data).then(r => r.data),
   deleteVendor: (id: number) => api.delete(`/api/candidatetrack/vendors/${id}`).then(r => r.data),
   bulkDeleteVendors: (ids: number[]) => api.delete("/api/candidatetrack/vendors", { data: { ids } }).then(r => r.data),
+  importVendorsCsv: (form: FormData) => api.post("/api/candidatetrack/vendors/import-csv", form, { headers: { "Content-Type": "multipart/form-data" } }).then(r => r.data),
 
   listCandidates: () => api.get("/api/candidatetrack/candidates").then(r => r.data),
   createCandidate: (form: FormData) =>

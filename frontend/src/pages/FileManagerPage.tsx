@@ -58,6 +58,7 @@ export default function FileManagerPage() {
   const bulkDeleteMut = useMutation({
     mutationFn: (ids: number[]) => adminApi.bulkDeleteRows(activeTable!, ids),
     onSuccess: (_data, ids) => { refetchRows(); setSelectedRowIds([]); flash(`Deleted ${ids.length} row(s).`); },
+    onError: (e: any) => { flash(`❌ Bulk delete failed: ${e.response?.data?.detail || e.message}`); },
   });
 
   const insertMut = useMutation({

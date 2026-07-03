@@ -165,12 +165,23 @@ async def save_api_key(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # Adzuna/Groq/Ollama are admin-managed only now — every other user
+    # inherits whatever the admin configures as the global fallback, so
+    # there's no legitimate reason for a non-admin to save their own here.
+    # (is_global handling below is effectively moot for non-admins once
+    # this fires, but is left in place as defense-in-depth.)
+    from utils.credentials import SHAREABLE_SERVICES
+    if payload.service in SHAREABLE_SERVICES and current_user.role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail=f"{payload.service.capitalize()} is configured by your administrator. Contact them to update it.",
+        )
+
     # is_global is a privileged flag: only an admin may set it, and only for
     # the services explicitly allowed to be shared (see utils/credentials.py).
     # Any other combination is silently coerced to False rather than
     # rejected outright, so a non-admin's request still succeeds — it just
     # saves as a normal private key instead of a platform-wide one.
-    from utils.credentials import SHAREABLE_SERVICES
     is_global = bool(
         payload.is_global
         and current_user.role == "admin"

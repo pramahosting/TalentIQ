@@ -5,7 +5,7 @@ Full database browser, user management, record editing for all tiq_* tables.
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, text, update, delete, inspect, func
+from sqlalchemy import select, text, update, delete, inspect, func, bindparam
 from sqlalchemy.engine import Row
 from pydantic import BaseModel
 
@@ -131,9 +131,16 @@ async def bulk_delete_rows(
     ids = payload.get("ids", [])
     if not ids:
         raise HTTPException(400, "No row ids provided")
-    await db.execute(text(f'DELETE FROM "{table}" WHERE id = ANY(:ids)'), {"ids": ids})
+    # A raw Python list bound to :ids with ANY(:ids) doesn't reliably expand
+    # through SQLAlchemy's text() + asyncpg — bindparam(expanding=True) with
+    # an IN clause is the correct, driver-safe way to bind a variable-length
+    # list of values in a raw SQL statement.
+    stmt = text(f'DELETE FROM "{table}" WHERE id IN :ids').bindparams(
+        bindparam("ids", expanding=True)
+    )
+    result = await db.execute(stmt, {"ids": ids})
     await db.commit()
-    return {"message": f"Deleted {len(ids)} row(s)"}
+    return {"message": f"Deleted {result.rowcount} row(s)"}
 
 
 # ── INSERT ROW ───────────────────────────────────────────────────────

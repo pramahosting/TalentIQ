@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from db.database import get_db
 from models.models import User, UserAPIKey, JDDocument
 from utils.auth_utils import get_current_user
-from utils.credentials import get_credential, get_all_credentials
+from utils.credentials import get_credential, get_all_credentials, get_groq_model, DEFAULT_GROQ_MODEL
 from utils.sequencing import next_sequence_number
 
 router = APIRouter()
@@ -133,7 +133,7 @@ def _call_groq(prompt: str, groq_key: str) -> str:
     from langchain_groq import ChatGroq
     from langchain.schema import HumanMessage
 
-    llm = ChatGroq(api_key=groq_key, model="llama3-70b-8192", temperature=0.35)
+    llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.35)
     resp = llm.invoke([HumanMessage(content=prompt)])
     return resp.content
 
@@ -158,6 +158,7 @@ async def _generate_jd_content(
     role_title: str, company_name: str, job_type: str, skills: List[str],
     experience: str, education: str,
     groq_key: Optional[str], ollama_base_url: Optional[str], ollama_model: Optional[str],
+    groq_model: str = DEFAULT_GROQ_MODEL,
 ) -> dict:
     """Generates JD content using an LLM only — Groq first, then Ollama.
     Raises HTTPException if no LLM is available or both fail."""
@@ -383,10 +384,12 @@ async def generate_jd(
     ollama_keys = await get_all_credentials(db, current_user.id, "ollama")
     ollama_base_url = ollama_keys.get("base_url")
     ollama_model = ollama_keys.get("model")
+    groq_model = await get_groq_model(db, current_user.id)
 
     content = await _generate_jd_content(
         payload.role_title, current_user.company or "", payload.job_type, payload.skills_required,
         payload.experience_required, payload.education_required, groq_key, ollama_base_url, ollama_model,
+        groq_model,
     )
 
     seq_num = await next_sequence_number(db, JDDocument, current_user.id)

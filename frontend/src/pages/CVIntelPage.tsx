@@ -22,6 +22,24 @@ interface AnalysisResult {
   aiPowered?: boolean;
   note?: string;
   aiError?: string;
+  strengthsBreakdown?: {
+    essentialMatched: string[];
+    technicalSkills: string[];
+    businessSkills: string[];
+    softSkills: string[];
+    significantExperience: string[];
+    certificationsDegrees: string[];
+  };
+  jdRequirements?: {
+    roleTitle: string;
+    location: string;
+    company: string;
+    essential: string[];
+    goodToHave: string[];
+    optional: string[];
+    minYearsExperience: number;
+    educationRequirement: string;
+  };
 }
 
 interface AnalyseData extends AnalysisResult {
@@ -480,18 +498,88 @@ export default function CVAnalysisPage() {
             </div>
           </div>
 
+          {/* JD Requirements — categorized, mirrors CandidateLens's JD Summary */}
+          {result.jdRequirements && (result.jdRequirements.essential?.length > 0 || result.jdRequirements.goodToHave?.length > 0) && (
+            <div className="tiq-card tiq-mb-4" style={{ borderLeft: "4px solid var(--violet-500)" }}>
+              <div className="tiq-card-title" style={{ fontSize: 13, marginBottom: 10 }}>Job Description Requirements</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {(result.jdRequirements.roleTitle || result.jdRequirements.company) && (
+                  <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                    {result.jdRequirements.roleTitle && <span><strong>{result.jdRequirements.roleTitle}</strong></span>}
+                    {result.jdRequirements.company && <span> · {result.jdRequirements.company}</span>}
+                    {result.jdRequirements.location && <span> · {result.jdRequirements.location}</span>}
+                  </div>
+                )}
+                {result.jdRequirements.essential?.length > 0 && (
+                  <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: "#ef4444", width: 90, flexShrink: 0, paddingTop: 2 }}>ESSENTIAL</span>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {result.jdRequirements.essential.map((s: string) => (
+                        <span key={s} className="tiq-badge" style={{ fontSize: 10, background: "#ef444420", color: "#ef4444" }}>{s}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {result.jdRequirements.goodToHave?.length > 0 && (
+                  <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: "#f59e0b", width: 90, flexShrink: 0, paddingTop: 2 }}>GOOD TO HAVE</span>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {result.jdRequirements.goodToHave.map((s: string) => (
+                        <span key={s} className="tiq-badge" style={{ fontSize: 10, background: "#f59e0b20", color: "#f59e0b" }}>{s}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {result.jdRequirements.optional?.length > 0 && (
+                  <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", width: 90, flexShrink: 0, paddingTop: 2 }}>OPTIONAL</span>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {result.jdRequirements.optional.map((s: string) => (
+                        <span key={s} className="tiq-badge tiq-badge-slate" style={{ fontSize: 10 }}>{s}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 20 }}>
             <div className="tiq-card" style={{ borderLeft: "4px solid #10b981" }}>
               <div className="tiq-card-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <CheckCircle size={14} color="#10b981" /> Strengths
               </div>
-              <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-                {result.strengths.map((s, i) => (
-                  <li key={i} style={{ display: "flex", gap: 10, marginBottom: 10, fontSize: 13 }}>
-                    <CheckCircle size={13} color="#10b981" style={{ flexShrink: 0, marginTop: 2 }} />{s}
-                  </li>
-                ))}
-              </ul>
+              {result.strengthsBreakdown ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  {[
+                    ["Essential Matched", result.strengthsBreakdown.essentialMatched, "#10b981"],
+                    ["Technical Skills", result.strengthsBreakdown.technicalSkills, "#3b82f6"],
+                    ["Business Skills", result.strengthsBreakdown.businessSkills, "#8b5cf6"],
+                    ["Soft Skills", result.strengthsBreakdown.softSkills, "#ec4899"],
+                    ["Significant Experience", result.strengthsBreakdown.significantExperience, "#f59e0b"],
+                    ["Certifications & Degrees", result.strengthsBreakdown.certificationsDegrees, "#06b6d4"],
+                  ].map(([label, items, color]: any) => items?.length > 0 && (
+                    <div key={label}>
+                      <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color, marginBottom: 4 }}>{label}</div>
+                      <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                        {items.map((s: string, i: number) => (
+                          <li key={i} style={{ display: "flex", gap: 8, marginBottom: 6, fontSize: 12 }}>
+                            <CheckCircle size={11} color={color} style={{ flexShrink: 0, marginTop: 2 }} />{s}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                  {result.strengths.map((s, i) => (
+                    <li key={i} style={{ display: "flex", gap: 10, marginBottom: 10, fontSize: 13 }}>
+                      <CheckCircle size={13} color="#10b981" style={{ flexShrink: 0, marginTop: 2 }} />{s}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
             <div className="tiq-card" style={{ borderLeft: "4px solid #ef4444" }}>
               <div className="tiq-card-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>

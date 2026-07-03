@@ -31,7 +31,7 @@ from pydantic import BaseModel
 from db.database import get_db, AsyncSessionLocal
 from models.models import User, UserAPIKey, JobLensSession, JobLensCandidate
 from utils.auth_utils import get_current_user
-from utils.credentials import get_credential, get_all_credentials
+from utils.credentials import get_credential, get_all_credentials, get_groq_model, DEFAULT_GROQ_MODEL
 from utils.sequencing import next_sequence_number
 
 router = APIRouter()
@@ -51,7 +51,7 @@ async def list_jd_options(
     jds = r.scalars().all()
     out = []
     for jd in jds:
-        client_name = jd.company_name or ""
+        client_name = ""
         if jd.client_id:
             cr = await db.execute(select(ClientModel).where(ClientModel.id == jd.client_id))
             client = cr.scalar_one_or_none()
@@ -67,15 +67,19 @@ async def list_vendor_candidates_for_jd(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """TrackedCandidates (Vendor Management submissions) for a specific JD —
-    dynamically filtered so 'New Analysis' only offers vendors/candidates
-    actually relevant to the selected JD."""
+    """TrackedCandidates (Vendor Management / Profile Management submissions)
+    for a specific JD — dynamically filtered so 'New Analysis' only offers
+    profiles actually relevant to a fresh analysis run: candidates already
+    Shortlisted, Selected, or Offered are excluded, since re-running ATS
+    scoring on a candidate who has already progressed past that stage isn't
+    useful here."""
     from models.models import TrackedCandidate, Vendor as VendorModel
+    EXCLUDED_STATUSES = {"Shortlisted", "Selected", "Offered"}
     r = await db.execute(
         select(TrackedCandidate).where(TrackedCandidate.jd_id == jd_id, TrackedCandidate.user_id == current_user.id)
         .order_by(TrackedCandidate.created_at.desc())
     )
-    candidates = r.scalars().all()
+    candidates = [c for c in r.scalars().all() if c.status not in EXCLUDED_STATUSES]
     out = []
     for c in candidates:
         vr = await db.execute(select(VendorModel).where(VendorModel.id == c.vendor_id))
@@ -292,7 +296,7 @@ def _clean_extracted_field(value: Optional[str]) -> str:
     return v
 
 
-async def extract_jd_details(jd_text: str, groq_key: str) -> dict:
+async def extract_jd_details(jd_text: str, groq_key: str, groq_model: str = DEFAULT_GROQ_MODEL) -> dict:
     """Extracts role title, location, company, and skills (categorized into
     Essential / Good to Have / Optional) from the JD in a single LLM call —
     used for both the CandidateLens "Job Description Summary" panel and the
@@ -301,7 +305,7 @@ async def extract_jd_details(jd_text: str, groq_key: str) -> dict:
         from langchain_groq import ChatGroq
         from langchain.schema import HumanMessage
 
-        llm = ChatGroq(api_key=groq_key, model="llama3-70b-8192", temperature=0.1)
+        llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.1)
         prompt = f"""You are a recruitment AI assistant. Read the job description below and
 extract these fields precisely. If a field genuinely isn't stated anywhere
 in the text, return an empty string for it — do NOT guess, and do NOT
@@ -401,15 +405,119 @@ def _heuristic_jd_details(jd_text: str) -> dict:
 
 # ── SCORING (mirrors calculateScore exactly) ─────────────────────────────────
 
+# Same synonym/abbreviation set used in CVAnalysis and JobHunter — plain
+# substring matching alone produces false-negative "gaps"/"missing skills"
+# for skills genuinely present but phrased/abbreviated/spelled differently
+# than the JD's exact wording (e.g. resume says "ML", JD extraction says
+# "Machine Learning"; or resume says "Dimensional Modelling" — a specific
+# technique that IS a form of "Data Modeling" — which used to show as a
+# false-negative gap since it's not a literal substring match at all).
+_UK_TO_US_SPELLING = [
+    (r"\bmodelling\b", "modeling"), (r"\blabelling\b", "labeling"),
+    (r"\bcancelled\b", "canceled"), (r"\btravelling\b", "traveling"),
+    (r"\borganisation", "organization"), (r"\bcolour", "color"),
+    (r"\blicence", "license"), (r"\bcentre\b", "center"),
+    (r"\bprogramme\b", "program"), (r"\banalyse", "analyze"),
+    (r"\boptimise", "optimize"), (r"\bcategorise", "categorize"),
+    (r"\bcustomise", "customize"), (r"\bfavour", "favor"),
+    (r"\bbehaviour", "behavior"), (r"\bvisualise", "visualize"),
+    (r"\bsummarise", "summarize"), (r"\bspecialise", "specialize"),
+]
+
+
+def _normalize_text(s: str) -> str:
+    s = s.lower()
+    for pattern, repl in _UK_TO_US_SPELLING:
+        s = re.sub(pattern, repl, s)
+    return s
+
+
+# Two kinds of entries, both one-directional (key = the general/JD-style
+# term; values = things that, if found in a resume, PROVE the general term
+# is satisfied): true synonyms/abbreviations, and specific-technique ->
+# general-skill-it's-a-form-of (curated, not fuzzy-string-guessed, so it
+# doesn't cause false positives the way blind similarity matching would).
+_SKILL_SYNONYMS = {
+    "ai": ["artificial intelligence"], "artificial intelligence": ["ai"],
+    "ml": ["machine learning"], "machine learning": ["ml",
+        "regression", "classification", "neural network", "deep learning",
+        "supervised learning", "unsupervised learning", "random forest",
+        "gradient boosting", "xgboost", "scikit-learn", "tensorflow", "pytorch"],
+    "bi": ["business intelligence"], "business intelligence": ["bi"],
+    "power bi": ["powerbi", "power-bi"],
+    "aws": ["amazon web services", "ec2", "s3", "redshift", "lambda",
+        "aws glue", "amazon redshift", "cloudformation"],
+    "amazon web services": ["aws"],
+    "azure": ["microsoft azure", "azure data factory", "azure synapse",
+        "azure synapse analytics", "adls", "adls gen2", "azure devops"],
+    "gcp": ["google cloud platform", "google cloud", "bigquery", "gcp bigquery"],
+    "google cloud platform": ["gcp"],
+    "api": ["apis", "application programming interface", "rest api", "restful api", "graphql"],
+    "apis": ["api"],
+    "etl": ["extract transform load", "extract, transform, load", "elt",
+        "data pipeline", "airflow", "dbt", "informatica", "talend", "ssis"],
+    "elt": ["etl"],
+    "data pipeline": ["etl", "elt", "airflow", "dbt", "data pipelines"],
+    "sql": ["structured query language", "t-sql", "pl/sql", "mysql", "postgresql", "postgres"],
+    "ci/cd": ["ci cd", "continuous integration", "continuous deployment", "jenkins", "github actions"],
+    "devops": ["dev ops"],
+    "nlp": ["natural language processing"], "natural language processing": ["nlp"],
+    "llm": ["large language model", "large language models", "gpt", "generative ai"],
+    "data governance": ["governance framework", "data governance framework",
+        "data stewardship", "data catalog", "data cataloguing", "data lineage",
+        "data quality framework", "collibra", "alation"],
+    "edw": ["enterprise data warehouse"], "enterprise data warehouse": ["edw"],
+    "mdm": ["master data management"], "master data management": ["mdm"],
+    "data mesh": ["domain-oriented data", "data domain", "data products"],
+    "kpi": ["key performance indicator"],
+    "ux": ["user experience"], "ui": ["user interface"],
+    "qa": ["quality assurance"],
+    "pm": ["project management", "project manager"],
+    "hr": ["human resources"],
+    "crm": ["customer relationship management", "salesforce"],
+    "erp": ["enterprise resource planning", "sap", "oracle erp", "netsuite"],
+    "data modeling": [
+        "dimensional modeling", "dimensional model", "data vault",
+        "data vault 2.0", "star schema", "snowflake schema",
+        "entity relationship modeling", "er modeling", "erd",
+        "third normal form", "3nf modeling", "kimball", "inmon",
+        "fsldm", "logical data modeling", "physical data modeling",
+        "conceptual data modeling", "normalization", "denormalization",
+    ],
+    "data architecture": [
+        "data mesh", "data fabric", "lakehouse", "data lakehouse",
+        "enterprise data warehouse", "edw", "data lake", "data warehouse",
+        "solution architecture", "enterprise architecture",
+    ],
+    "cloud architecture": ["aws", "azure", "gcp", "multi-cloud", "hybrid cloud"],
+}
+
+
 def calculate_score(cv_text: str, jd_skills: list) -> dict:
-    """Direct port of the original JS calculateScore function."""
-    # Clean CV text same way as original
-    cv_lower = cv_text.lower()
+    """Direct port of the original JS calculateScore function, with matching
+    made tolerant of synonyms/abbreviations/spelling and specific-technique
+    -> general-skill relationships (same rationale as CVAnalysis's
+    _skill_present — exact substring alone produces false-negative "gaps"
+    for skills that are genuinely present but phrased differently)."""
+    # Clean CV text same way as original, then spelling-normalize
+    cv_lower = _normalize_text(cv_text)
     cv_lower = re.sub(r"\b(an|the|and|or|of|in|on|for|with|to|be|is|are|it|at|from|as|by|that|this|if|we|you)\b", "", cv_lower)
     cv_lower = re.sub(r"[^a-z0-9+#.\-]", " ", cv_lower)
 
-    matched = [s for s in jd_skills if s in cv_lower]
-    gap     = [s for s in jd_skills if s not in cv_lower]
+    def _present(skill: str) -> bool:
+        sk = _normalize_text(skill)
+        if sk in cv_lower:
+            return True
+        for variant in _SKILL_SYNONYMS.get(sk, []):
+            if _normalize_text(variant) in cv_lower:
+                return True
+        words = [w for w in sk.split() if len(w) > 2]
+        if len(words) >= 2 and all(w in cv_lower for w in words):
+            return True
+        return False
+
+    matched = [s for s in jd_skills if _present(s)]
+    gap     = [s for s in jd_skills if s not in matched]
 
     score = (len(matched) / len(jd_skills) * 100) if jd_skills else 0
     bonus = 0
@@ -436,13 +544,13 @@ def calculate_score(cv_text: str, jd_skills: list) -> dict:
 
 # ── QUESTION GENERATION ──────────────────────────────────────────────────────
 
-async def generate_questions(jd_text: str, candidate_name: str, matched_skills: list, groq_key: str) -> list:
+async def generate_questions(jd_text: str, candidate_name: str, matched_skills: list, groq_key: str, groq_model: str = DEFAULT_GROQ_MODEL) -> list:
     """Mirrors buildQuestionPrompt + callOllamaGenerate."""
     try:
         from langchain_groq import ChatGroq
         from langchain.schema import HumanMessage
 
-        llm = ChatGroq(api_key=groq_key, model="llama3-70b-8192", temperature=0.4)
+        llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.4)
         skills_str = ", ".join(matched_skills[:8]) if matched_skills else "relevant skills"
         prompt = f"""You are a recruitment AI assistant.
 Generate exactly 5 interview questions for {candidate_name} based on the Job Description below.
@@ -479,51 +587,74 @@ def _default_questions(name: str, skills: list) -> list:
 
 # ── RESUME SUMMARY (10 statements) ──────────────────────────────────────────
 
-async def generate_resume_summary(cv_text: str, groq_key: Optional[str]) -> list:
-    """Produce exactly 10 concise, factual statements summarising the resume,
-    covering Education, Skills, Experience, Availability, and Citizenship/Work
-    Rights status. Uses Groq LLM when a key is available, otherwise falls
-    back to heuristic keyword extraction."""
+async def generate_resume_summary(cv_text: str, groq_key: Optional[str], groq_model: str = DEFAULT_GROQ_MODEL) -> dict:
+    """Produce a categorized resume summary — multiple specific bullet
+    points grouped under Experience, Skills, Education, Achievements, and
+    Availability & Work Rights — rather than one flat list of generic
+    sentences. Each bullet should surface a genuinely relevant, specific
+    detail (a role, a scale, a result, a named skill), not a filler
+    restatement of the section heading. Uses Groq LLM when a key is
+    available, otherwise falls back to heuristic keyword extraction."""
     if groq_key:
         try:
             from langchain_groq import ChatGroq
             from langchain.schema import HumanMessage
 
-            llm = ChatGroq(api_key=groq_key, model="llama3-70b-8192", temperature=0.2)
-            prompt = f"""You are a recruitment analyst. Read the resume below and produce
-EXACTLY 10 concise, factual, one-sentence statements summarising the candidate.
-Cover these areas across the 10 statements: Education, Skills, Experience,
-Availability, and Citizenship/Work Rights status. If a topic is not mentioned
-in the resume, write a statement saying it was "Not specified in resume."
-Do not invent facts that aren't supported by the resume text.
+            llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.2)
+            prompt = f"""You are a recruitment analyst producing a sharp, specific candidate
+summary for a recruiter who is short on time. Read the resume below and
+extract the MOST relevant and important points — prioritize specifics
+(role titles, years, scale, named technologies, quantified results) over
+generic statements. Do not invent facts the resume doesn't support.
 
 Resume:
-\"\"\"{cv_text[:4000]}\"\"\"
+\"\"\"{cv_text[:5000]}\"\"\"
 
-Return ONLY valid JSON in this exact format:
-{{"statements": ["...", "...", "...", "...", "...", "...", "...", "...", "...", "..."]}}"""
+Return ONLY valid JSON, no markdown, no commentary, in this exact format:
+{{
+  "experience": ["<specific, substantive bullet about a role/scope/achievement>", "..."],
+  "skills": ["<specific bullet grouping related skills or naming a standout one>", "..."],
+  "education": ["<specific bullet — degree, institution, year if stated>", "..."],
+  "achievements": ["<specific, quantified accomplishment if the resume supports one>", "..."],
+  "availability_work_rights": ["<specific bullet if stated>", "..."]
+}}
+
+Rules:
+- experience: 3-5 bullets, each about a distinct role, project, or scope of responsibility — not one bullet per job title, but the most IMPORTANT/relevant parts of their experience
+- skills: 2-4 bullets, grouping related skills together rather than one skill per bullet
+- education: 1-2 bullets
+- achievements: 1-3 bullets — only include if the resume actually states a concrete result/metric; omit entirely (empty list) rather than inventing one
+- availability_work_rights: 0-2 bullets — only include if the resume actually mentions notice period, availability, citizenship, or work rights; omit entirely if not mentioned
+- Every bullet must be a full, specific sentence a recruiter could act on — not a category label restated as a sentence"""
 
             resp = llm.invoke([HumanMessage(content=prompt)])
             raw = resp.content.strip().replace("```json", "").replace("```", "").strip()
+            start, end = raw.find("{"), raw.rfind("}")
+            if start != -1 and end != -1:
+                raw = raw[start:end + 1]
             data = json.loads(raw)
-            statements = [s for s in data.get("statements", []) if s]
-            if statements:
-                return statements[:10]
+            result = {
+                "experience": [s for s in data.get("experience", []) if s][:5],
+                "skills": [s for s in data.get("skills", []) if s][:4],
+                "education": [s for s in data.get("education", []) if s][:2],
+                "achievements": [s for s in data.get("achievements", []) if s][:3],
+                "availability_work_rights": [s for s in data.get("availability_work_rights", []) if s][:2],
+            }
+            if any(result.values()):
+                return result
         except Exception:
             pass
     return _fallback_resume_summary(cv_text)
 
 
-def _fallback_resume_summary(cv_text: str) -> list:
-    """Heuristic 10-statement resume summary used when no Groq key is configured."""
+def _fallback_resume_summary(cv_text: str) -> dict:
+    """Heuristic categorized resume summary used when no Groq key is configured."""
     low = cv_text.lower()
-    statements = []
+    result: dict = {"experience": [], "skills": [], "education": [], "achievements": [], "availability_work_rights": []}
 
     edu_m = re.search(r"(bachelor|master|phd|doctorate|diploma|degree)[^\n.]{0,90}", low)
-    statements.append(
-        f"Education: {edu_m.group().strip().capitalize()}." if edu_m
-        else "Education: Not specified in resume."
-    )
+    if edu_m:
+        result["education"].append(edu_m.group().strip().capitalize() + ".")
 
     keyword_bank = [
         "python", "java", "javascript", "sql", "excel", "power bi", "tableau",
@@ -532,58 +663,30 @@ def _fallback_resume_summary(cv_text: str) -> list:
         "salesforce", "sap", "financial reporting", "data analysis",
     ]
     found_skills = [s for s in keyword_bank if s in low]
-    statements.append(
-        f"Skills: Resume indicates experience with {', '.join(found_skills[:6])}." if found_skills
-        else "Skills: No specific technical skills clearly listed."
-    )
+    if found_skills:
+        result["skills"].append(f"Resume indicates experience with {', '.join(found_skills[:6])}.")
 
     exp_m = re.search(r"(\d{1,2})\+?\s*(?:years?|yrs?)\s*(?:of\s+)?experience", low)
-    statements.append(
-        f"Experience: Approximately {exp_m.group(1)}+ years of relevant experience." if exp_m
-        else "Experience: Years of experience not explicitly stated in resume."
-    )
-
-    statements.append(
-        "Experience: Resume references current or recent professional roles." if re.search(r"present|current(ly)?\s+work", low)
-        else "Experience: Most recent role not clearly identifiable from resume."
-    )
+    if exp_m:
+        result["experience"].append(f"Approximately {exp_m.group(1)}+ years of relevant experience.")
+    if re.search(r"present|current(ly)?\s+work", low):
+        result["experience"].append("Resume references a current or recent professional role.")
+    if re.search(r"project", low):
+        result["experience"].append("Resume highlights project-based work experience.")
+    if not result["experience"]:
+        result["experience"].append("Years and scope of experience not explicitly stated in resume.")
 
     if re.search(r"immediate(ly)?\s+available|available\s+immediately|notice\s+period", low):
         avail_m = re.search(r"([a-z0-9 ]{0,10}notice\s+period[a-z0-9 ]{0,15}|immediate(ly)?\s+available)", low)
-        statements.append(
-            f"Availability: {avail_m.group().strip().capitalize()}." if avail_m
-            else "Availability: Mentioned in resume."
-        )
-    else:
-        statements.append("Availability: Not specified in resume.")
-
+        result["availability_work_rights"].append((avail_m.group().strip().capitalize() + ".") if avail_m else "Availability mentioned in resume.")
     if re.search(r"citizen|permanent resident|\bpr\b|work visa|work rights|unrestricted work rights|485 visa|482 visa|sponsorship", low):
         cit_m = re.search(r"([a-z0-9 ]{0,20}(citizen|permanent resident|work visa|work rights|sponsorship)[a-z0-9 ]{0,20})", low)
-        statements.append(
-            f"Citizenship/Work Rights: {cit_m.group().strip().capitalize()}." if cit_m
-            else "Citizenship/Work Rights: Mentioned in resume."
-        )
-    else:
-        statements.append("Citizenship/Work Rights: Not specified in resume.")
+        result["availability_work_rights"].append((cit_m.group().strip().capitalize() + ".") if cit_m else "Citizenship/work rights mentioned in resume.")
 
-    if "@" in cv_text:
-        statements.append("Contact: Valid contact email address is present in the resume.")
-    else:
-        statements.append("Contact: No email address detected in the resume.")
+    if re.search(r"certificat", low):
+        result["achievements"].append("Resume mentions professional certification(s).")
 
-    statements.append(
-        "Certifications: Resume mentions professional certification(s)." if re.search(r"certificat", low)
-        else "Certifications: No certifications explicitly mentioned."
-    )
-
-    statements.append(
-        "Project Experience: Resume highlights project-based work experience." if re.search(r"project", low)
-        else "Project Experience: No specific projects called out in resume."
-    )
-
-    while len(statements) < 10:
-        statements.append("No further notable details extracted from resume.")
-    return statements[:10]
+    return result
 
 
 # ── SMTP EMAIL SENDING ────────────────────────────────────────────────────────
@@ -669,6 +772,7 @@ def _fmt(c: JobLensCandidate) -> dict:
         "video_analysis_status": c.video_analysis_status or "Pending",
         "source_vendor_id": c.source_vendor_id,
         "source_vendor_name": c.source_vendor_name or "",
+        "strengths_breakdown": c.strengths_breakdown or None,
     }
 
 
@@ -699,7 +803,7 @@ async def run_joblens(
             raise HTTPException(404, "Selected JD not found.")
         # Use the JD's stored description as the JD text; title/client used for the summary panel
         final_jd = jd_record.description or jd_record.title
-        jd_client_name = jd_record.company_name or ""
+        jd_client_name = ""
         if jd_record.client_id:
             cr = await db.execute(select(ClientModel).where(ClientModel.id == jd_record.client_id))
             client = cr.scalar_one_or_none()
@@ -730,10 +834,28 @@ async def run_joblens(
 
     # ── Get Groq key (own key first, falls back to admin-configured global) ──
     groq_key = await get_credential(db, current_user.id, "groq", "api_key")
+    groq_model = await get_groq_model(db, current_user.id)
 
     # ── Extract JD details: role, location, company, categorized skills (LLM or heuristic) ──
-    if groq_key:
-        jd_details = await extract_jd_details(final_jd, groq_key)
+    # If this session was started from an existing JD Management record that
+    # already has persisted categorized requirements, reuse them directly —
+    # re-extracting the same JD's requirements via LLM on every single
+    # analysis run would be wasteful and could drift from what's shown in
+    # JD Management itself.
+    if jd_record_id and jd_record and (jd_record.essential_skills or jd_record.good_to_have_skills):
+        jd_details = {
+            "role": jd_record.title,
+            "location": "",
+            "company": jd_client_name,
+            "essential": jd_record.essential_skills or [],
+            "good_to_have": jd_record.good_to_have_skills or [],
+            "optional": jd_record.optional_skills or [],
+            "skills": list(dict.fromkeys(
+                (jd_record.essential_skills or []) + (jd_record.good_to_have_skills or []) + (jd_record.optional_skills or [])
+            )),
+        }
+    elif groq_key:
+        jd_details = await extract_jd_details(final_jd, groq_key, groq_model)
     else:
         jd_details = _heuristic_jd_details(final_jd)
     jd_skills = jd_details["skills"]
@@ -786,11 +908,22 @@ async def run_joblens(
             status = "Review"
 
         if groq_key:
-            questions = await generate_questions(final_jd, info["name"], result["matched"], groq_key)
+            questions = await generate_questions(final_jd, info["name"], result["matched"], groq_key, groq_model)
         else:
             questions = _default_questions(info["name"], result["matched"])
 
-        resume_summary = await generate_resume_summary(cv_text, groq_key)
+        resume_summary = await generate_resume_summary(cv_text, groq_key, groq_model)
+
+        # Categorized strengths breakdown — same schema as CVAnalysis and
+        # JobHunter (utils/llm_extraction.py), evaluated against this
+        # session's already-extracted JD requirements so "Essential Matched"
+        # reflects this specific JD, not a generic skill dump.
+        from utils.llm_extraction import extract_candidate_strengths
+        strengths_breakdown = await extract_candidate_strengths(
+            cv_text,
+            {"essential": jd_details.get("essential", []), "good_to_have": jd_details.get("good_to_have", [])},
+            groq_key, groq_model,
+        )
 
         fname_lower = (filename or "").lower()
         if fname_lower.endswith(".pdf"):
@@ -825,6 +958,14 @@ async def run_joblens(
             source_vendor_id=source_vendor_id,
             source_vendor_name=source_vendor_name,
             source_tracked_candidate_id=source_tracked_candidate_id,
+            strengths_breakdown={
+                "essentialMatched": strengths_breakdown.get("essential_matched", []),
+                "technicalSkills": strengths_breakdown.get("technical_skills", []),
+                "businessSkills": strengths_breakdown.get("business_skills", []),
+                "softSkills": strengths_breakdown.get("soft_skills", []),
+                "significantExperience": strengths_breakdown.get("significant_experience", []),
+                "certificationsDegrees": strengths_breakdown.get("certifications_degrees", []),
+            },
         )
 
     candidates = []
@@ -976,11 +1117,12 @@ async def get_questions(
         return {"questions": candidate.interview_questions, "ai_powered": False}
 
     groq_key = await get_credential(db, current_user.id, "groq", "api_key")
+    groq_model = await get_groq_model(db, current_user.id)
 
     if groq_key:
         questions = await generate_questions(
             session.jd_text or "", candidate.name,
-            candidate.matched_skills or [], groq_key
+            candidate.matched_skills or [], groq_key, groq_model
         )
     else:
         questions = _default_questions(candidate.name, candidate.matched_skills or [])
@@ -1152,12 +1294,12 @@ def _transcribe_video(video_bytes: bytes, mimetype: str, groq_key: str) -> str:
 
 
 async def _analyze_transcript(
-    transcript: str, questions: list, candidate_name: str, groq_key: str
+    transcript: str, questions: list, candidate_name: str, groq_key: str, groq_model: str = DEFAULT_GROQ_MODEL
 ) -> dict:
     from langchain_groq import ChatGroq
     from langchain.schema import HumanMessage
 
-    llm = ChatGroq(api_key=groq_key, model="llama3-70b-8192", temperature=0.2)
+    llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.2)
     questions_block = "\n".join(f"{i+1}. {q}" for i, q in enumerate(questions)) or "(not recorded)"
     prompt = f"""You are an experienced hiring manager reviewing a recorded video
 interview transcript for {candidate_name}. Be fair and evidence-based — only
@@ -1206,6 +1348,7 @@ async def _run_video_analysis(candidate_id: int):
             await db.commit()
 
             groq_key = await get_credential(db, session.user_id, "groq", "api_key")
+            groq_model = await get_groq_model(db, session.user_id)
             if not groq_key:
                 c.video_analysis_status = "Failed"
                 c.video_analysis = {"error": "No Groq API key configured (own or admin-shared) — required for transcription and analysis."}
@@ -1226,7 +1369,7 @@ async def _run_video_analysis(candidate_id: int):
                 return
 
             analysis = await _analyze_transcript(
-                transcript, c.interview_questions or [], c.name or "the candidate", groq_key
+                transcript, c.interview_questions or [], c.name or "the candidate", groq_key, groq_model
             )
 
             c.video_transcript = transcript

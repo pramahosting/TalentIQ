@@ -12,6 +12,33 @@ from db.database import engine
 from sqlalchemy import text
 
 MIGRATIONS = [
+    # Client: location -> address rename; partnership_from removed from the
+    # model (left as an orphaned column in the DB — no destructive DROP)
+    "ALTER TABLE tiq_clients RENAME COLUMN location TO address",
+
+    # Vendor: location -> address, area_of_coverage -> coverage_region
+    "ALTER TABLE tiq_vendors RENAME COLUMN location TO address",
+    "ALTER TABLE tiq_vendors RENAME COLUMN area_of_coverage TO coverage_region",
+
+    # JD: uploaded JD document (Word/PDF), alongside the existing description text
+    "ALTER TABLE tiq_jd_records ADD COLUMN IF NOT EXISTS jd_file_blob BYTEA",
+    "ALTER TABLE tiq_jd_records ADD COLUMN IF NOT EXISTS jd_file_filename VARCHAR(300)",
+    "ALTER TABLE tiq_jd_records ADD COLUMN IF NOT EXISTS jd_file_mimetype VARCHAR(100)",
+
+    # Candidate: address + work permission status
+    "ALTER TABLE tiq_tracked_candidates ADD COLUMN IF NOT EXISTS address VARCHAR(300)",
+    "ALTER TABLE tiq_tracked_candidates ADD COLUMN IF NOT EXISTS work_permission VARCHAR(50)",
+
+    "ALTER TABLE tiq_jd_records ADD COLUMN IF NOT EXISTS essential_skills JSON DEFAULT '[]'",
+    "ALTER TABLE tiq_jd_records ADD COLUMN IF NOT EXISTS good_to_have_skills JSON DEFAULT '[]'",
+    "ALTER TABLE tiq_jd_records ADD COLUMN IF NOT EXISTS optional_skills JSON DEFAULT '[]'",
+    "ALTER TABLE tiq_jd_records ADD COLUMN IF NOT EXISTS min_years_experience INTEGER DEFAULT 0",
+    "ALTER TABLE tiq_jd_records ADD COLUMN IF NOT EXISTS education_requirement VARCHAR(300)",
+
+    "ALTER TABLE tiq_job_matches ADD COLUMN IF NOT EXISTS strengths_breakdown JSON",
+    "ALTER TABLE tiq_job_matches ADD COLUMN IF NOT EXISTS jd_requirements JSON",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS strengths_breakdown JSON",
+
     # Per-user sequential numbering (session numbers isolated per user)
     "ALTER TABLE tiq_job_searches ADD COLUMN IF NOT EXISTS sequence_number INTEGER",
     "ALTER TABLE tiq_jobintel_runs ADD COLUMN IF NOT EXISTS sequence_number INTEGER",
@@ -126,17 +153,29 @@ MIGRATIONS = [
 ]
 
 async def run():
-    async with engine.begin() as conn:
-        for sql in MIGRATIONS:
-            try:
+    # CRITICAL: each statement gets its OWN transaction (a fresh connection
+    # per statement, not one shared transaction for the whole loop). In
+    # Postgres, once any statement inside a transaction fails, that entire
+    # transaction is marked aborted and every subsequent statement in it
+    # fails with InFailedSQLTransactionError — even statements that would
+    # have succeeded on their own. With one shared transaction for all ~65
+    # migrations, hitting even a single expected "already applied" skip
+    # (which happens on almost every run after the first) silently broke
+    # every migration listed after it, with no clear signal that anything
+    # was wrong beyond a wall of WARN lines. Isolating each statement in
+    # its own transaction means one failure only ever affects that one
+    # statement.
+    for sql in MIGRATIONS:
+        try:
+            async with engine.begin() as conn:
                 await conn.execute(text(sql))
-                print(f"  OK: {sql[:60]}")
-            except Exception as e:
-                err = str(e)
-                if "does not exist" in err or "already exists" in err or "cannot alter" in err.lower():
-                    print(f"  SKIP (already ok): {sql[:60]}")
-                else:
-                    print(f"  WARN: {err[:100]}")
+            print(f"  OK: {sql[:60]}")
+        except Exception as e:
+            err = str(e)
+            if "does not exist" in err or "already exists" in err or "cannot alter" in err.lower():
+                print(f"  SKIP (already ok): {sql[:60]}")
+            else:
+                print(f"  WARN: {err[:100]}")
     print("  Migration complete.")
 
 if __name__ == "__main__":

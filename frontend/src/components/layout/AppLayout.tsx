@@ -1,19 +1,49 @@
+import { useState } from "react";
 import { Outlet, NavLink, Link } from "react-router-dom";
 import {
   LayoutDashboard, Search, BarChart2, Users,
-  Settings, LogOut, Shield, Database, BrainCircuit, Briefcase, Home, FileEdit
+  Settings, LogOut, Shield, Database, BrainCircuit, Briefcase, Home, FileEdit,
+  ChevronDown, ChevronRight,
 } from "lucide-react";
 import { useAuth } from "../../hooks/useAuth";
 
-const NAV_ITEMS = [
-  { to: "/app",          label: "Dashboard",    icon: LayoutDashboard, end: true  },
-  { to: "/app/jobhunt",  label: "JobHunter",    icon: Search           },
-  { to: "/app/jobintel", label: "MarketIntel",  icon: BarChart2        },
-  { to: "/app/linklens", label: "LinkExplore",  icon: Users            },
-  { to: "/app/cvintel",  label: "CVAnalysis",   icon: BrainCircuit     },
-  { to: "/app/jdcreator",label: "JD Creator",   icon: FileEdit         },
-  { to: "/app/joblens",  label: "CandidateLens",icon: Briefcase        },
+const INDIVIDUAL_ITEMS = [
+  { to: "/app/cvintel",  label: "CVAnalysis",   icon: BrainCircuit },
+  { to: "/app/jobhunt",  label: "JobHunter",    icon: Search       },
 ];
+
+const BUSINESS_ITEMS = [
+  { to: "/app/jobintel", label: "MarketIntel",  icon: BarChart2    },
+  { to: "/app/linklens", label: "LinkExplore",  icon: Users        },
+  { to: "/app/jdcreator",label: "JD Creator",   icon: FileEdit     },
+  { to: "/app/joblens",  label: "CandidateLens",icon: Briefcase    },
+];
+
+function NavGroup({ title, items, defaultOpen = true }: { title: string; items: typeof INDIVIDUAL_ITEMS; defaultOpen?: boolean }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%",
+          background: "none", border: "none", cursor: "pointer", padding: "8px 16px",
+          fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase",
+          color: "rgba(255,255,255,.35)",
+        }}
+      >
+        {title}
+        {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+      </button>
+      {open && items.map(({ to, label, icon: Icon }) => (
+        <NavLink key={to} to={to}
+          className={({ isActive }) => `tiq-nav-item${isActive ? " active" : ""}`}>
+          <Icon size={16} />{label}
+        </NavLink>
+      ))}
+    </div>
+  );
+}
 
 export default function AppLayout() {
   const { user, logout } = useAuth();
@@ -28,13 +58,14 @@ export default function AppLayout() {
         </div>
 
         <nav className="tiq-nav">
-          <div className="tiq-nav-section">Workspace</div>
-          {NAV_ITEMS.map(({ to, label, icon: Icon, end }) => (
-            <NavLink key={to} to={to} end={end}
-              className={({ isActive }) => `tiq-nav-item${isActive ? " active" : ""}`}>
-              <Icon size={16} />{label}
-            </NavLink>
-          ))}
+          <div className="tiq-nav-section">Agents</div>
+          <NavLink to="/app" end
+            className={({ isActive }) => `tiq-nav-item${isActive ? " active" : ""}`}>
+            <LayoutDashboard size={16} />Dashboard
+          </NavLink>
+
+          <NavGroup title="Individual" items={INDIVIDUAL_ITEMS} />
+          <NavGroup title="Business" items={BUSINESS_ITEMS} />
 
           <div className="tiq-nav-section">Account</div>
           <NavLink to="/app/settings"
