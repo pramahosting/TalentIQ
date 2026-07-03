@@ -127,10 +127,11 @@ async def jobhunter_dashboard_summary(
     role searched for, since JobHunter has no client/vendor-style entity to
     group by (search criteria is the natural dimension here)."""
     uid = current_user.id
+    role_expr = case((JobSearch.role.is_(None), "Unspecified"), (JobSearch.role == "", "Unspecified"), else_=JobSearch.role)
 
     search_stmt = (
         select(
-            func.coalesce(func.nullif(JobSearch.role, ""), "Unspecified").label("role"),
+            role_expr.label("role"),
             func.count(func.distinct(JobSearch.id)).label("total_searches"),
             func.count(Job.id).label("total_jobs_found"),
             func.max(JobSearch.searched_at).label("last_search"),
@@ -138,14 +139,14 @@ async def jobhunter_dashboard_summary(
         .select_from(JobSearch)
         .outerjoin(Job, Job.search_id == JobSearch.id)
         .where(JobSearch.user_id == uid)
-        .group_by(func.coalesce(func.nullif(JobSearch.role, ""), "Unspecified"))
+        .group_by(role_expr)
         .order_by(func.count(func.distinct(JobSearch.id)).desc())
     )
     search_rows = (await db.execute(search_stmt)).all()
 
     match_stmt = (
         select(
-            func.coalesce(func.nullif(JobSearch.role, ""), "Unspecified").label("role"),
+            role_expr.label("role"),
             func.count(JobMatch.id).label("total_matches"),
             func.avg(JobMatch.ats_score).label("avg_score"),
         )
@@ -153,7 +154,7 @@ async def jobhunter_dashboard_summary(
         .join(Job, JobMatch.job_id == Job.id)
         .join(JobSearch, Job.search_id == JobSearch.id)
         .where(JobMatch.user_id == uid)
-        .group_by(func.coalesce(func.nullif(JobSearch.role, ""), "Unspecified"))
+        .group_by(role_expr)
     )
     match_by_role = {
         r.role: {"total_matches": r.total_matches, "avg_score": round(r.avg_score, 1) if r.avg_score is not None else None}
@@ -180,16 +181,17 @@ async def marketintel_dashboard_summary(
 ):
     """Real-time, per-role breakdown of MarketIntel runs."""
     uid = current_user.id
+    role_expr = case((JobIntelRun.role.is_(None), "Unspecified"), (JobIntelRun.role == "", "Unspecified"), else_=JobIntelRun.role)
     stmt = (
         select(
-            func.coalesce(func.nullif(JobIntelRun.role, ""), "Unspecified").label("role"),
+            role_expr.label("role"),
             func.count(JobIntelRun.id).label("total_runs"),
             func.sum(JobIntelRun.total_jobs_scraped).label("total_jobs_analyzed"),
             func.max(JobIntelRun.created_at).label("last_run"),
         )
         .select_from(JobIntelRun)
         .where(JobIntelRun.user_id == uid)
-        .group_by(func.coalesce(func.nullif(JobIntelRun.role, ""), "Unspecified"))
+        .group_by(role_expr)
         .order_by(func.count(JobIntelRun.id).desc())
     )
     rows = (await db.execute(stmt)).all()
@@ -212,9 +214,10 @@ async def linkexplore_dashboard_summary(
 ):
     """Real-time, per-job-title breakdown of LinkExplore searches."""
     uid = current_user.id
+    title_expr = case((LinkLensSearch.job_title.is_(None), "Unspecified"), (LinkLensSearch.job_title == "", "Unspecified"), else_=LinkLensSearch.job_title)
     stmt = (
         select(
-            func.coalesce(func.nullif(LinkLensSearch.job_title, ""), "Unspecified").label("job_title"),
+            title_expr.label("job_title"),
             func.count(LinkLensSearch.id).label("total_searches"),
             func.sum(LinkLensSearch.profiles_found).label("total_profiles"),
             func.count(func.distinct(LinkLensSearch.country)).label("countries"),
@@ -222,7 +225,7 @@ async def linkexplore_dashboard_summary(
         )
         .select_from(LinkLensSearch)
         .where(LinkLensSearch.user_id == uid)
-        .group_by(func.coalesce(func.nullif(LinkLensSearch.job_title, ""), "Unspecified"))
+        .group_by(title_expr)
         .order_by(func.count(LinkLensSearch.id).desc())
     )
     rows = (await db.execute(stmt)).all()
