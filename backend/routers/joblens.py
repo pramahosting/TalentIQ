@@ -493,6 +493,43 @@ _SKILL_SYNONYMS = {
 }
 
 
+def _score_from_verdicts(strengths: dict, cv_text: str, essential_count: int, good_to_have_count: int) -> dict:
+    """Builds the same score/matched/gap/bonus shape calculate_score() used
+    to return, but driven by the LLM's per-item essential/good-to-have
+    verdicts (utils.llm_extraction.extract_candidate_strengths) instead of
+    deterministic keyword matching — same fix as CVAnalysis and JobHunter,
+    for the same reason: exact/token matching can't judge long
+    capability-statement requirements or requirements phrased differently
+    than the resume (e.g. "Data Modeling" vs a resume that says
+    "Dimensional Modeling", a specific technique that IS a form of it)."""
+    matched_essential = strengths.get("essential_matched", [])
+    missing_essential = strengths.get("essential_missing", [])
+    matched_good = strengths.get("good_to_have_matched", [])
+
+    essential_pct = (len(matched_essential) / essential_count * 100) if essential_count else 70
+    good_bonus = min(15, len(matched_good) * 5) if good_to_have_count else 10
+
+    cv_lower = _normalize_text(cv_text)
+    bonus = 0
+    reasons = []
+    if re.search(r"bachelor|master|degree", cv_lower):
+        bonus += 10
+        reasons.append("Degree +10")
+    if re.search(r"experience|\d+\s+(years|year)", cv_lower):
+        bonus += 5
+        reasons.append("Experience +5")
+
+    score = min(100, round(essential_pct * 0.75 + good_bonus + bonus, 1))
+
+    return {
+        "score": score,
+        "matched": matched_essential + matched_good,
+        "gap": missing_essential,
+        "bonus": bonus,
+        "reasons": "; ".join(reasons),
+    }
+
+
 def calculate_score(cv_text: str, jd_skills: list) -> dict:
     """Direct port of the original JS calculateScore function, with matching
     made tolerant of synonyms/abbreviations/spelling and specific-technique
@@ -897,8 +934,22 @@ async def run_joblens(
         if not cv_text.strip():
             return None
 
-        info   = extract_candidate_info(cv_text, filename)
-        result = calculate_score(cv_text, jd_skills)
+        info = extract_candidate_info(cv_text, filename)
+
+        # Categorized strengths breakdown, including per-item essential/
+        # good-to-have verdicts — this now drives BOTH the display panel
+        # AND the actual score/matched/missing below, instead of being
+        # computed separately from a weaker deterministic path.
+        from utils.llm_extraction import extract_candidate_strengths
+        strengths_breakdown = await extract_candidate_strengths(
+            cv_text,
+            {"essential": jd_details.get("essential", []), "good_to_have": jd_details.get("good_to_have", [])},
+            groq_key, groq_model,
+        )
+        result = _score_from_verdicts(
+            strengths_breakdown, cv_text,
+            len(jd_details.get("essential", [])), len(jd_details.get("good_to_have", [])),
+        )
 
         score  = result["score"]
         status = "Not Qualified"
@@ -913,17 +964,6 @@ async def run_joblens(
             questions = _default_questions(info["name"], result["matched"])
 
         resume_summary = await generate_resume_summary(cv_text, groq_key, groq_model)
-
-        # Categorized strengths breakdown — same schema as CVAnalysis and
-        # JobHunter (utils/llm_extraction.py), evaluated against this
-        # session's already-extracted JD requirements so "Essential Matched"
-        # reflects this specific JD, not a generic skill dump.
-        from utils.llm_extraction import extract_candidate_strengths
-        strengths_breakdown = await extract_candidate_strengths(
-            cv_text,
-            {"essential": jd_details.get("essential", []), "good_to_have": jd_details.get("good_to_have", [])},
-            groq_key, groq_model,
-        )
 
         fname_lower = (filename or "").lower()
         if fname_lower.endswith(".pdf"):

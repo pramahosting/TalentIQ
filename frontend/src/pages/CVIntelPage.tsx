@@ -210,10 +210,11 @@ export default function CVAnalysisPage() {
     queryKey: ["cvintel-history"],
     queryFn: cvintelApi.listHistory,
   });
-  const history: Array<{ id: number; name: string; score: number; result: AnalyseData; ts: string }> =
+  const history: Array<{ id: number; name: string; jd: string; score: number; result: AnalyseData; ts: string }> =
     historyRaw.map((r: any) => ({
       id: r.id,
       name: r.sourceName || "Resume",
+      jd: r.jdInfo?.role || "",
       score: r.overallScore,
       result: { ...r.result, candidateInfo: r.candidateInfo, jdInfo: r.jdInfo, sourceName: r.sourceName },
       ts: r.createdAt ? new Date(r.createdAt).toLocaleString() : "",
@@ -222,6 +223,12 @@ export default function CVAnalysisPage() {
   // null = "show the live/latest analysis"; set when the user manually
   // browses a past entry from the History strip below.
   const [viewingHistId, setViewingHistId] = useState<number | null>(null);
+  // The mutation cache (liveResult, below) is deliberately independent of
+  // the history list — it survives navigation and doesn't know or care
+  // whether its corresponding history record still exists in the DB. That
+  // means deleting the history entry for the result currently on screen
+  // does nothing to the display unless we track that dismissal ourselves.
+  const [liveResultDismissed, setLiveResultDismissed] = useState(false);
 
   const analyseMut = useMutation({
     mutationKey: ["cvintel-analyze"],
@@ -256,7 +263,7 @@ export default function CVAnalysisPage() {
   const liveResult = genState.status === "success" ? genState.data ?? null : null;
   const displayResult: AnalyseData | null = viewingHistId
     ? history.find(h => h.id === viewingHistId)?.result ?? null
-    : liveResult;
+    : (liveResultDismissed ? null : liveResult);
 
   // Save each newly-completed analysis to the backend. Driven off the
   // shared cache (not the mutation's own onSuccess) so it reliably fires
@@ -286,6 +293,7 @@ export default function CVAnalysisPage() {
     if (!jdText.trim() && !jdFile) { setFormError("Please provide a job description."); return; }
     if (!resumeText.trim() && !resumeFile) { setFormError("Please provide your resume."); return; }
     setViewingHistId(null);
+    setLiveResultDismissed(false);
     analyseMut.mutate();
   };
 
@@ -374,14 +382,19 @@ export default function CVAnalysisPage() {
             <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <BrainCircuit size={14} color="var(--violet-500)" /> Past Analyses ({history.length})
             </span>
-            <button onClick={() => { if(confirm("Clear all history?")) { cvintelApi.deleteAllHistory().then(() => qc.invalidateQueries({ queryKey: ["cvintel-history"] })); setViewingHistId(null); }}}
+            <button onClick={() => {
+                if (!confirm("Clear all history?")) return;
+                cvintelApi.deleteAllHistory()
+                  .then(() => { qc.invalidateQueries({ queryKey: ["cvintel-history"] }); setViewingHistId(null); setLiveResultDismissed(true); })
+                  .catch((e: any) => alert(`Failed to clear history: ${e?.response?.data?.detail || e.message}`));
+              }}
               style={{ background:"none",border:"none",cursor:"pointer",fontSize:11,color:"var(--rose-500)",display:"flex",alignItems:"center",gap:4 }}>
               <X size={11} /> Clear all
             </button>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {history.map(h => (
-              <button key={h.id}
+              <div key={h.id}
                 onClick={() => setViewingHistId(h.id)}
                 style={{
                   padding: "6px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
@@ -390,18 +403,31 @@ export default function CVAnalysisPage() {
                   color: viewingHistId === h.id ? "var(--violet-500)" : "var(--text-secondary)",
                   display: "flex", alignItems: "center", gap: 6,
                 }}>
-                <span>{h.name}</span>
+                <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", lineHeight: 1.3 }}>
+                  <span>{h.name}</span>
+                  {h.jd && <span style={{ fontSize: 10, color: "var(--text-muted)", fontWeight: 500 }}>JD: {h.jd}</span>}
+                </span>
                 <span style={{ padding: "1px 6px", borderRadius: 4, fontSize: 10,
                   background: h.score >= 75 ? "#10b98120" : h.score >= 50 ? "#f59e0b20" : "#ef444420",
                   color: h.score >= 75 ? "#10b981" : h.score >= 50 ? "#f59e0b" : "#ef4444" }}>
                   {h.score}%
                 </span>
                 <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{h.ts}</span>
-                <span onClick={e => { e.stopPropagation(); cvintelApi.deleteHistoryItem(h.id).then(() => qc.invalidateQueries({ queryKey: ["cvintel-history"] })); if(viewingHistId === h.id) setViewingHistId(null); }}
-                  style={{ color: "var(--text-muted)", cursor: "pointer", display: "flex" }}>
+                <button type="button" onClick={e => {
+                    e.stopPropagation();
+                    const wasShowingThisAsLive = viewingHistId === null && history[0]?.id === h.id;
+                    cvintelApi.deleteHistoryItem(h.id)
+                      .then(() => {
+                        qc.invalidateQueries({ queryKey: ["cvintel-history"] });
+                        if (viewingHistId === h.id) setViewingHistId(null);
+                        if (wasShowingThisAsLive) setLiveResultDismissed(true);
+                      })
+                      .catch((err: any) => alert(`Failed to delete: ${err?.response?.data?.detail || err.message}`));
+                  }}
+                  style={{ background: "none", border: "none", padding: 0, color: "var(--text-muted)", cursor: "pointer", display: "flex" }}>
                   <X size={10} />
-                </span>
-              </button>
+                </button>
+              </div>
             ))}
           </div>
         </div>
@@ -452,21 +478,33 @@ export default function CVAnalysisPage() {
                 <div className="tiq-card" style={{ borderLeft: "4px solid var(--violet-500)", padding: "14px 18px" }}>
                   <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".5px", color: "var(--text-muted)", marginBottom: 10 }}>Job Description</div>
                   <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 10 }}>{jdInfo.role}</div>
-                  {jdInfo.requirements?.length > 0 && (
-                    <div>
-                      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", marginBottom: 6, display: "flex", alignItems: "center", gap: 5 }}>
-                        <List size={11} /> Key Requirements
+                  {(() => {
+                    // Prefer the backend's LLM-extracted requirements (reliable)
+                    // over the client-side regex bullet-parser used only for the
+                    // instant pre-analysis preview (fragile — many JDs don't use
+                    // a bullet format it can detect).
+                    const essential = result.jdRequirements?.essential || [];
+                    const goodToHave = result.jdRequirements?.goodToHave || [];
+                    const combined = essential.length || goodToHave.length
+                      ? [...essential, ...goodToHave]
+                      : (jdInfo.requirements || []);
+                    if (combined.length === 0) return null;
+                    return (
+                      <div>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", marginBottom: 6, display: "flex", alignItems: "center", gap: 5 }}>
+                          <List size={11} /> Key Requirements
+                        </div>
+                        <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                          {combined.slice(0, 6).map((r: string, i: number) => (
+                            <li key={i} style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 4, paddingLeft: 12, position: "relative" }}>
+                              <span style={{ position: "absolute", left: 0, color: "var(--violet-500)" }}>·</span>
+                              {r}
+                            </li>
+                          ))}
+                        </ul>
                       </div>
-                      <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-                        {jdInfo.requirements.slice(0, 4).map((r: string, i: number) => (
-                          <li key={i} style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 4, paddingLeft: 12, position: "relative" }}>
-                            <span style={{ position: "absolute", left: 0, color: "var(--violet-500)" }}>·</span>
-                            {r}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
+                    );
+                  })()}
                 </div>
               )}
             </div>

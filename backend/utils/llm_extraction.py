@@ -147,57 +147,93 @@ async def extract_candidate_strengths(
     resume_text: str, jd_requirements: dict, groq_key: Optional[str], groq_model: str,
 ) -> dict:
     """Returns:
-    {"essential_matched": [...], "technical_skills": [...], "business_skills": [...],
+    {"essential_matched": [...], "essential_missing": [...], "good_to_have_matched": [...],
+     "technical_skills": [...], "business_skills": [...],
      "soft_skills": [...], "significant_experience": [...],
      "certifications_degrees": [...], "gaps": [...], "summary": str,
      "years_experience": int, "education": str, "ai_powered": bool}
+
+    Each essential/good_to_have requirement is evaluated INDIVIDUALLY by the
+    LLM (matched: true/false per item, not a free-text summary) — this is
+    the actual scoring signal used downstream. Requirements are often long,
+    abstract capability statements ("Strong ability to translate business
+    needs into data architecture...") or use different terminology than the
+    resume (e.g. JD says "Data Modeling", resume says "Dimensional
+    Modeling" — a specific technique that IS a form of it). Neither a
+    literal substring match nor a "does every word appear somewhere" check
+    can reliably judge either case — that needs actual reading
+    comprehension, which is exactly what asking the LLM to judge each item
+    individually gives us, instead of discarding that judgment for a
+    cruder deterministic fallback.
     """
-    if groq_key:
+    essential = [s for s in jd_requirements.get("essential", []) if s][:15]
+    good_to_have = [s for s in jd_requirements.get("good_to_have", []) if s][:10]
+
+    if groq_key and (essential or good_to_have):
         try:
             from langchain_groq import ChatGroq
             from langchain.schema import HumanMessage
 
-            llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.15)
-            req_block = json.dumps({
-                "essential": jd_requirements.get("essential", []),
-                "good_to_have": jd_requirements.get("good_to_have", []),
-            }, indent=2)[:1800]
+            llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.1)
+            essential_block = "\n".join(f"{i+1}. {r}" for i, r in enumerate(essential)) or "(none)"
+            good_block = "\n".join(f"{i+1}. {r}" for i, r in enumerate(good_to_have)) or "(none)"
 
-            prompt = f"""You are an expert recruiter evaluating a candidate against a specific
-role. You already have these JD requirements:
-{req_block}
+            prompt = f"""You are an expert recruiter evaluating a candidate's resume against a
+specific job's requirements. For EACH numbered requirement below, judge
+whether the resume provides genuine evidence for it — reading for meaning
+and equivalent experience, not exact wording. Some requirements are
+phrased as skills ("Data Modeling"), others as broad capability statements
+("Strong ability to translate business needs into data architecture") —
+judge both the same way: does the resume's actual content support this,
+even if described using different terms, a more specific technique, or
+different phrasing? For example, a resume mentioning "Dimensional
+Modeling", "Data Vault", or "Star Schema design" DOES satisfy a
+requirement for "Data Modeling", since those are specific forms of it.
+Only mark something matched if the resume genuinely supports it — do not
+be generous with unrelated content.
 
-Now read the resume below and produce an evidence-based breakdown. Only
-credit something the resume actually supports — do not invent skills or
-experience it doesn't contain.
+ESSENTIAL REQUIREMENTS:
+{essential_block}
+
+GOOD-TO-HAVE REQUIREMENTS:
+{good_block}
 
 RESUME:
 \"\"\"{resume_text[:4500]}\"\"\"
 
 Return ONLY valid JSON, no markdown, no commentary:
 {{
-  "essential_matched": ["<which ESSENTIAL JD requirements this candidate clearly satisfies, worded specifically>"],
+  "essential_verdicts": [{{"n": 1, "matched": true}}, {{"n": 2, "matched": false}}, ...],
+  "good_to_have_verdicts": [{{"n": 1, "matched": true}}, ...],
   "technical_skills": ["<candidate's technical/hard skills relevant to this role — tools, languages, platforms>"],
   "business_skills": ["<business/domain skills — stakeholder management, budgeting, domain expertise, strategy>"],
   "soft_skills": ["<interpersonal skills evidenced in the resume — leadership, communication, problem solving>"],
   "significant_experience": ["<notable experience highlights with specifics — seniority, scale, achievements, years>"],
   "certifications_degrees": ["<certifications and degrees found in the resume>"],
-  "gaps": ["<JD essential/good_to_have items NOT evidenced in the resume>"],
   "summary": "<2-3 sentence evidence-based overall assessment>",
   "years_experience": <integer, best estimate>,
   "education": "<highest qualification found, or empty string>"
-}}"""
+}}
+
+essential_verdicts and good_to_have_verdicts MUST have exactly one entry per numbered requirement above, in order."""
             resp = llm.invoke([HumanMessage(content=prompt)])
             data = _parse_json_response(resp.content)
-            if data and (data.get("technical_skills") or data.get("essential_matched")):
+            if data and (data.get("essential_verdicts") is not None or data.get("technical_skills")):
+                ev = {v.get("n"): bool(v.get("matched")) for v in (data.get("essential_verdicts") or []) if isinstance(v, dict)}
+                gv = {v.get("n"): bool(v.get("matched")) for v in (data.get("good_to_have_verdicts") or []) if isinstance(v, dict)}
+                essential_matched = [r for i, r in enumerate(essential) if ev.get(i + 1)]
+                essential_missing = [r for i, r in enumerate(essential) if not ev.get(i + 1)]
+                good_matched = [r for i, r in enumerate(good_to_have) if gv.get(i + 1)]
                 return {
-                    "essential_matched": [s for s in data.get("essential_matched", []) if s][:12],
+                    "essential_matched": essential_matched[:15],
+                    "essential_missing": essential_missing[:15],
+                    "good_to_have_matched": good_matched[:10],
                     "technical_skills": [s for s in data.get("technical_skills", []) if s][:10],
                     "business_skills": [s for s in data.get("business_skills", []) if s][:8],
                     "soft_skills": [s for s in data.get("soft_skills", []) if s][:8],
                     "significant_experience": [s for s in data.get("significant_experience", []) if s][:6],
                     "certifications_degrees": [s for s in data.get("certifications_degrees", []) if s][:8],
-                    "gaps": [s for s in data.get("gaps", []) if s][:10],
+                    "gaps": essential_missing[:10],
                     "summary": (data.get("summary") or "").strip(),
                     "years_experience": int(data.get("years_experience") or 0),
                     "education": _clean_field(data.get("education")),
@@ -259,11 +295,16 @@ Return ONLY valid JSON, no markdown, no commentary:
 
 
 def _fallback_candidate_strengths(resume_text: str, jd_requirements: dict) -> dict:
-    from routers.cvintel import DOMAIN_SKILLS as _bank
-    resume_lower = resume_text.lower()
+    from routers.cvintel import DOMAIN_SKILLS as _bank, _skill_present, _normalize_skill, _normalize_text
+
+    resume_lower = _normalize_text(resume_text)
+    candidate_skill_set = {_normalize_skill(s) for s in _bank if s in resume_lower}
 
     essential = jd_requirements.get("essential", []) or []
-    essential_matched = [s for s in essential if s.lower() in resume_lower]
+    good_to_have = jd_requirements.get("good_to_have", []) or []
+    essential_matched = [s for s in essential if _skill_present(_normalize_skill(s), candidate_skill_set, resume_lower)]
+    essential_missing = [s for s in essential if s not in essential_matched]
+    good_to_have_matched = [s for s in good_to_have if _skill_present(_normalize_skill(s), candidate_skill_set, resume_lower)]
 
     all_found = [s for s in _bank if s in resume_lower]
     # Heuristic split — genuinely categorizing skill "type" needs an LLM;
@@ -275,21 +316,20 @@ def _fallback_candidate_strengths(resume_text: str, jd_requirements: dict) -> di
     years = max((int(y) for y in years_m), default=0)
 
     edu_m = re.search(r"(bachelor'?s?|master'?s?|phd|degree|diploma)[^.\n]{0,80}", resume_lower)
-    cert_m = re.findall(r"\b([A-Z]{2,6}(?:\s?-?\s?certified)?)\b", resume_text)
     certifications_degrees = []
     if edu_m:
         certifications_degrees.append(edu_m.group().strip().capitalize())
 
-    gaps = [s for s in essential if s not in essential_matched]
-
     return {
         "essential_matched": essential_matched,
+        "essential_missing": essential_missing,
+        "good_to_have_matched": good_to_have_matched,
         "technical_skills": technical_skills,
         "business_skills": [],
         "soft_skills": [],
         "significant_experience": [f"{years}+ years of relevant experience"] if years else [],
         "certifications_degrees": certifications_degrees,
-        "gaps": gaps,
+        "gaps": essential_missing,
         "summary": f"Matches {len(essential_matched)} of {len(essential)} essential requirements based on keyword analysis.",
         "years_experience": years,
         "education": certifications_degrees[0] if certifications_degrees else "",
