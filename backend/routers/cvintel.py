@@ -315,35 +315,22 @@ def _normalize_text(s: str) -> str:
 
 
 def _compute_weighted_score(jd_req: dict, strengths: dict, resume: str) -> dict:
-    """Deterministic scoring math over the extracted fields, BUT the actual
-    essential/good-to-have match determination now comes directly from the
-    LLM's own per-item verdict (strengths["essential_matched"/"essential_missing"]
-    from utils.llm_extraction.extract_candidate_strengths) rather than being
-    re-derived here via string/token matching — that matching could not
-    reliably judge long capability-statement requirements or requirements
-    phrased differently than the resume (e.g. "Data Modeling" vs a resume
-    that says "Dimensional Modeling", a specific technique that IS a form
-    of it). The deterministic _skill_present check is kept only as a
-    fallback for the rare case the LLM path didn't populate these fields.
-    Weights: essential coverage 50%, experience-level fit 25%, education
-    fit 10%, good-to-have bonus 10%, baseline content-depth allowance 5%."""
+    """Deterministic, transparent scoring — plain Python math over the
+    structured fields extracted above. Weights: hard-skill coverage 50%,
+    experience-level fit 25%, education fit 10%, good-to-have bonus 10%,
+    baseline content-depth allowance 5%."""
     resume_lower = _normalize_text(resume)
     candidate_skill_set = {
         _normalize_skill(s) for s in
         (strengths.get("technical_skills", []) + strengths.get("business_skills", []))
     }
 
-    essential = [s for s in jd_req.get("essential", []) if s]
-    good_to_have = [s for s in jd_req.get("good_to_have", []) if s]
+    essential = [_normalize_skill(s) for s in jd_req.get("essential", []) if s]
+    good_to_have = [_normalize_skill(s) for s in jd_req.get("good_to_have", []) if s]
 
-    if "essential_matched" in strengths or "essential_missing" in strengths:
-        matched = strengths.get("essential_matched", [])
-        missing = strengths.get("essential_missing", [])
-        matched_good = strengths.get("good_to_have_matched", [])
-    else:
-        matched = [s for s in essential if _skill_present(_normalize_skill(s), candidate_skill_set, resume_lower)]
-        missing = [s for s in essential if s not in matched]
-        matched_good = [s for s in good_to_have if _skill_present(_normalize_skill(s), candidate_skill_set, resume_lower)]
+    matched = [s for s in essential if _skill_present(s, candidate_skill_set, resume_lower)]
+    missing = [s for s in essential if s not in matched]
+    matched_good = [s for s in good_to_have if _skill_present(s, candidate_skill_set, resume_lower)]
 
     skills_pct = round(len(matched) / len(essential) * 100) if essential else 70
 
@@ -445,8 +432,8 @@ async def _score_resume(resume: str, jd: str, groq_key: Optional[str], groq_mode
             "softSkills": max(30, overall - 10),
             "format": min(92, overall + 8),
         },
-        "matchedSkills": matched[:15],
-        "missingSkills": missing[:15],
+        "matchedSkills": [s.title() for s in matched][:15],
+        "missingSkills": [s.title() for s in missing][:15],
         "aiPowered": ai_powered,
         # ── Categorized strengths — the actual point of this round's change ──
         "strengthsBreakdown": {

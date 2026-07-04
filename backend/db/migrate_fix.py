@@ -6,7 +6,6 @@ Run once on startup via main.py lifespan.
 import asyncio
 import sys
 import os
-import hashlib
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from db.database import engine
@@ -154,44 +153,29 @@ MIGRATIONS = [
 ]
 
 async def run():
-    # The real cost here isn't any one statement — it's that `--reload`
-    # re-runs this ENTIRE ~65-statement pass on every single file save
-    # during development, even when nothing schema-related changed at all.
-    # We fingerprint the MIGRATIONS list itself; if it's identical to the
-    # last successful run, skip straight past the whole thing (one fast
-    # query) instead of re-checking every statement again.
-    migrations_fingerprint = hashlib.sha256("\n".join(MIGRATIONS).encode()).hexdigest()
-
-    async with engine.connect() as conn:
-        autocommit_conn = await conn.execution_options(isolation_level="AUTOCOMMIT")
-
-        await autocommit_conn.execute(text(
-            "CREATE TABLE IF NOT EXISTS tiq_migration_state (id INTEGER PRIMARY KEY, fingerprint VARCHAR(64))"
-        ))
-        existing = (await autocommit_conn.execute(
-            text("SELECT fingerprint FROM tiq_migration_state WHERE id = 1")
-        )).scalar_one_or_none()
-
-        if existing == migrations_fingerprint:
-            print(f"  Migrations unchanged since last run ({len(MIGRATIONS)} statements) — skipping.")
-            return
-
-        for sql in MIGRATIONS:
-            try:
-                await autocommit_conn.execute(text(sql))
-                print(f"  OK: {sql[:60]}")
-            except Exception as e:
-                err = str(e)
-                if "does not exist" in err or "already exists" in err or "cannot alter" in err.lower():
-                    print(f"  SKIP (already ok): {sql[:60]}")
-                else:
-                    print(f"  WARN: {err[:100]}")
-
-        await autocommit_conn.execute(
-            text("INSERT INTO tiq_migration_state (id, fingerprint) VALUES (1, :fp) "
-                 "ON CONFLICT (id) DO UPDATE SET fingerprint = :fp"),
-            {"fp": migrations_fingerprint},
-        )
+    # CRITICAL: each statement gets its OWN transaction (a fresh connection
+    # per statement, not one shared transaction for the whole loop). In
+    # Postgres, once any statement inside a transaction fails, that entire
+    # transaction is marked aborted and every subsequent statement in it
+    # fails with InFailedSQLTransactionError — even statements that would
+    # have succeeded on their own. With one shared transaction for all ~65
+    # migrations, hitting even a single expected "already applied" skip
+    # (which happens on almost every run after the first) silently broke
+    # every migration listed after it, with no clear signal that anything
+    # was wrong beyond a wall of WARN lines. Isolating each statement in
+    # its own transaction means one failure only ever affects that one
+    # statement.
+    for sql in MIGRATIONS:
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(sql))
+            print(f"  OK: {sql[:60]}")
+        except Exception as e:
+            err = str(e)
+            if "does not exist" in err or "already exists" in err or "cannot alter" in err.lower():
+                print(f"  SKIP (already ok): {sql[:60]}")
+            else:
+                print(f"  WARN: {err[:100]}")
     print("  Migration complete.")
 
 if __name__ == "__main__":
