@@ -45,11 +45,11 @@ export const jobhuntApi = {
     return api.post("/api/jobhunt/resume", form).then((r) => r.data);
   },
   listResumes: () => api.get("/api/jobhunt/resumes").then((r) => r.data),
-  searchJobs: (data: any) => api.post("/api/jobhunt/search", data).then((r) => r.data),
+  searchJobs: (data: any) => api.post("/api/jobhunt/search", data, { timeout: 120_000 }).then((r) => r.data),
   listSearches: () => api.get("/api/jobhunt/searches").then((r) => r.data),
   deleteSearch: (id: number) => api.delete(`/api/jobhunt/searches/${id}`).then((r) => r.data),
   deleteAllSearches: () => api.delete("/api/jobhunt/searches").then((r) => r.data),
-  matchResume: (data: any) => api.post("/api/jobhunt/match", data).then((r) => r.data),
+  matchResume: (data: any) => api.post("/api/jobhunt/match", data, { timeout: 180_000 }).then((r) => r.data),
   listMatches: () => api.get("/api/jobhunt/matches").then((r) => r.data),
   exportExcel: (searchId: number) =>
     api.get(`/api/jobhunt/export/${searchId}`, { responseType: "blob" }).then((r) => r.data),
@@ -96,7 +96,7 @@ export const joblensApi = {
 };
 
 export const jdcreatorApi = {
-  generate: (data: any) => api.post("/api/jdcreator/generate", data).then(r => r.data),
+  generate: (data: any) => api.post("/api/jdcreator/generate", data, { timeout: 120_000 }).then(r => r.data),
   listDocuments: () => api.get("/api/jdcreator/documents").then(r => r.data),
   getDocument: (id: number) => api.get(`/api/jdcreator/documents/${id}`).then(r => r.data),
   deleteDocument: (id: number) => api.delete(`/api/jdcreator/documents/${id}`).then(r => r.data),

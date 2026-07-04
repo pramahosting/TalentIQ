@@ -1,7 +1,7 @@
 import { } from "react-router-dom";
 import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Upload, Search, Target, Download, ExternalLink, ChevronDown, ChevronUp, FileText, Trash2 } from "lucide-react";
+import { Upload, Search, Target, Download, ExternalLink, ChevronDown, ChevronUp, FileText, Trash2, AlertTriangle } from "lucide-react";
 import { jobhuntApi, downloadBlob } from "../lib/api";
 import { useLatestMutation } from "../hooks/useLatestMutation";
 
@@ -355,6 +355,12 @@ export default function JobHunterPage() {
                     </div>
                   </div>
 
+                  {m.strengths_breakdown && !m.strengths_breakdown.ai_powered && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#ef4444", background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.3)", borderRadius: 6, padding: "6px 10px", marginTop: 8 }}>
+                      <AlertTriangle size={12} />
+                      Fallback mode — LLM extraction failed, this match uses basic keyword matching only. Check Groq/Ollama settings.
+                    </div>
+                  )}
                   {m.strengths_breakdown && (
                     <details style={{ marginTop: 8, marginBottom: 8 }}>
                       <summary style={{ fontSize: 13, fontWeight: 600, cursor: "pointer", color: "var(--teal-500)", marginBottom: 8 }}>

@@ -20,6 +20,7 @@ interface AnalysisResult {
   matchedSkills: string[];
   missingSkills: string[];
   aiPowered?: boolean;
+  groqModel?: string | null;
   note?: string;
   aiError?: string;
   strengthsBreakdown?: {
@@ -244,6 +245,11 @@ export default function CVAnalysisPage() {
       if (jdFile)     form.append("jd_file", jdFile);
       const res = await api.post("/api/cvintel/analyze", form, {
         headers: { "Content-Type": "multipart/form-data" },
+        // Two sequential extraction calls happen server-side (JD then
+        // resume), each potentially trying Ollama before falling back to
+        // Groq — the default 60s timeout doesn't leave enough margin for
+        // that worst case.
+        timeout: 180_000,
       });
       // Bundle the derived candidate/JD summary info together with the API
       // result so it's all captured atomically in the mutation cache — this
@@ -440,9 +446,19 @@ export default function CVAnalysisPage() {
       {/* ── Results ── */}
       {result && (
         <div>
-          {result.aiPowered && (
+          {result.aiPowered ? (
             <div className="tiq-alert tiq-alert-success tiq-mb-4" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <Sparkles size={14} /> AI-powered analysis by Groq LLM
+              <Sparkles size={14} /> AI-powered analysis by Groq LLM{result.groqModel ? ` (${result.groqModel})` : ""}
+            </div>
+          ) : (
+            <div className="tiq-alert tiq-mb-4" style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.3)", color: "#ef4444" }}>
+              <AlertTriangle size={14} />
+              <span>
+                <strong>Fallback mode:</strong> the LLM extraction failed, so this result uses basic keyword
+                matching only — expect sparser skill categories and a less accurate score. Check that your
+                Groq API key and model in Settings → API Keys are valid, and that Ollama is reachable if
+                you're relying on it as a fallback.
+              </span>
             </div>
           )}
           {result.note && (

@@ -5,7 +5,7 @@ import { useLatestMutation } from "../hooks/useLatestMutation";
 import {
   Users, Upload, FileText, Play, Download, ChevronDown, ChevronUp,
   CheckCircle, Clock, XCircle, Star, Video, RefreshCw, Sparkles, BarChart2,
-  Trash2, Mail, Building2 } from "lucide-react";
+  Trash2, Mail, Building2, AlertTriangle } from "lucide-react";
 import { api } from "../lib/api";
 import JDManagementTab from "../components/candidatetrack/JDManagementTab";
 import VendorManagementTab from "../components/candidatetrack/VendorManagementTab";
@@ -32,8 +32,13 @@ import HistoryDropdown from "../components/HistoryDropdown";
 // ─── API ───────────────────────────────────────────────────────────────────
 const jobLensApi = {
   deleteSession: (id: number) => api.delete(`/api/joblens/sessions/${id}`).then(r => r.data),
+  // Scoring N candidates involves 2-3 sequential Groq calls each — even
+  // with backend-side concurrency, a larger batch can legitimately take
+  // several minutes. The global 60s default (fine for everything else)
+  // isn't enough here.
   run: (form: FormData) => api.post("/api/joblens/run", form, {
     headers: { "Content-Type": "multipart/form-data" },
+    timeout: 300_000,
   }).then(r => r.data),
   sessions: () => api.get("/api/joblens/sessions").then(r => r.data),
   session: (id: number) => api.get(`/api/joblens/sessions/${id}`).then(r => r.data),
