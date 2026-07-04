@@ -362,6 +362,16 @@ export default function JobHunterPage() {
                       </summary>
                       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 10 }}>
                         <div>
+                          {(m.strengths_breakdown.years_experience > 0 || m.strengths_breakdown.education) && (
+                            <div style={{ display: "flex", gap: 12, fontSize: 11, color: "var(--text-secondary)", marginBottom: 10, paddingBottom: 8, borderBottom: "1px solid var(--border)" }}>
+                              {m.strengths_breakdown.years_experience > 0 && (
+                                <span><strong>Experience:</strong> {m.strengths_breakdown.years_experience}+ years</span>
+                              )}
+                              {m.strengths_breakdown.education && (
+                                <span><strong>Education:</strong> {m.strengths_breakdown.education}</span>
+                              )}
+                            </div>
+                          )}
                           {[
                             ["Essential Matched", m.strengths_breakdown.essential_matched, "#10b981"],
                             ["Technical Skills", m.strengths_breakdown.technical_skills, "#3b82f6"],
@@ -385,6 +395,16 @@ export default function JobHunterPage() {
                             <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", marginBottom: 8 }}>
                               JD Requirements
                             </div>
+                            {(m.jd_requirements.min_years_experience > 0 || m.jd_requirements.education_requirement) && (
+                              <div style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 11, color: "var(--text-secondary)", marginBottom: 10, paddingBottom: 8, borderBottom: "1px solid var(--border)" }}>
+                                {m.jd_requirements.min_years_experience > 0 && (
+                                  <span><strong>Experience Required:</strong> {m.jd_requirements.min_years_experience}+ years</span>
+                                )}
+                                {m.jd_requirements.education_requirement && (
+                                  <span><strong>Education Required:</strong> {m.jd_requirements.education_requirement}</span>
+                                )}
+                              </div>
+                            )}
                             {[
                               ["Essential", m.jd_requirements.essential, "#ef4444"],
                               ["Good to Have", m.jd_requirements.good_to_have, "#f59e0b"],

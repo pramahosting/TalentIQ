@@ -47,11 +47,13 @@ export default function FileManagerPage() {
   const updateMut = useMutation({
     mutationFn: ({ id, data }: any) => adminApi.updateRow(activeTable!, id, data),
     onSuccess: () => { refetchRows(); setEditRow(null); flash("Row updated."); },
+    onError: (e: any) => { flash(`❌ Update failed: ${e.response?.data?.detail || e.message}`); },
   });
 
   const deleteMut = useMutation({
     mutationFn: (id: number) => adminApi.deleteRow(activeTable!, id),
     onSuccess: () => { refetchRows(); flash("Row deleted."); },
+    onError: (e: any) => { flash(`❌ Delete failed: ${e.response?.data?.detail || e.message}`); },
   });
 
   const [selectedRowIds, setSelectedRowIds] = useState<Array<number | string>>([]);
@@ -64,6 +66,7 @@ export default function FileManagerPage() {
   const insertMut = useMutation({
     mutationFn: (data: any) => adminApi.insertRow(activeTable!, data),
     onSuccess: () => { refetchRows(); setNewRow(false); setNewData({}); flash("Row inserted."); },
+    onError: (e: any) => { flash(`❌ Insert failed: ${e.response?.data?.detail || e.message}`); },
   });
 
   const runSql = async () => {
