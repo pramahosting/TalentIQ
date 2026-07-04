@@ -45,6 +45,16 @@ def _parse_json_response(raw: str) -> Optional[dict]:
     try:
         return json.loads(text)
     except Exception:
+        pass
+    # One repair attempt for the most common near-miss issues: a stray
+    # "..." left in from a schema example, or a trailing comma before a
+    # closing bracket — both otherwise cause a full parse failure and silent
+    # fallback to the much weaker heuristic path.
+    try:
+        repaired = re.sub(r",?\s*\.\.\.\s*", "", text)
+        repaired = re.sub(r",(\s*[\]}])", r"\1", repaired)
+        return json.loads(repaired)
+    except Exception:
         return None
 
 
@@ -201,10 +211,14 @@ GOOD-TO-HAVE REQUIREMENTS:
 RESUME:
 \"\"\"{resume_text[:4500]}\"\"\"
 
-Return ONLY valid JSON, no markdown, no commentary:
+Return ONLY valid JSON, no markdown, no commentary. essential_verdicts must
+have exactly {len(essential)} entries (one per essential requirement above,
+numbered 1 to {len(essential)}) and good_to_have_verdicts must have exactly
+{len(good_to_have)} entries — do not abbreviate or use "..." anywhere in
+your response, list every single entry explicitly:
 {{
-  "essential_verdicts": [{{"n": 1, "matched": true}}, {{"n": 2, "matched": false}}, ...],
-  "good_to_have_verdicts": [{{"n": 1, "matched": true}}, ...],
+  "essential_verdicts": [{{"n": 1, "matched": true}}, {{"n": 2, "matched": false}}],
+  "good_to_have_verdicts": [{{"n": 1, "matched": true}}],
   "technical_skills": ["<candidate's technical/hard skills relevant to this role — tools, languages, platforms>"],
   "business_skills": ["<business/domain skills — stakeholder management, budgeting, domain expertise, strategy>"],
   "soft_skills": ["<interpersonal skills evidenced in the resume — leadership, communication, problem solving>"],
@@ -213,9 +227,7 @@ Return ONLY valid JSON, no markdown, no commentary:
   "summary": "<2-3 sentence evidence-based overall assessment>",
   "years_experience": <integer, best estimate>,
   "education": "<highest qualification found, or empty string>"
-}}
-
-essential_verdicts and good_to_have_verdicts MUST have exactly one entry per numbered requirement above, in order."""
+}}"""
             resp = llm.invoke([HumanMessage(content=prompt)])
             data = _parse_json_response(resp.content)
             if data and (data.get("essential_verdicts") is not None or data.get("technical_skills")):

@@ -1,4 +1,5 @@
 @echo off
+setlocal enabledelayedexpansion
 title TalentIQ Platform
 
 set "ROOT=%~dp0"
@@ -74,8 +75,8 @@ if "%DOPIP%"=="1" (
     echo  ^(This window will stay open^)
     cd /d "%BACKEND%"
     "%VENVPIP%" install -r requirements.txt > "C:\Temp\tiq_pip.log" 2>&1
-    set "PIPERR=%errorlevel%"
-    if "%PIPERR%"=="0" (
+    set "PIPERR=!errorlevel!"
+    if "!PIPERR!"=="0" (
         echo %DATE%> "C:\Temp\tiq_pip.stamp"
         echo  OK packages installed
     ) else (
@@ -137,13 +138,54 @@ echo  OK launchers written
 echo.
 
 :: ── Step 8: Start services ────────────────────────────────────────────────
+:: Polls the actual HTTP response of each service (not just whether the
+:: port is open — Vite/uvicorn can accept a TCP connection before they're
+:: actually ready to serve a working page) before opening the browser.
 echo  Step 8: Starting services...
-start "TalentIQ Backend"  cmd /k "C:\Temp\tiq_b.cmd"
-echo  Waiting for backend to start...
-timeout /t 12 /nobreak >nul
+start "TalentIQ Backend" cmd /k "C:\Temp\tiq_b.cmd"
+
+echo  Waiting for backend (http://localhost:8000)...
+set "BACKEND_READY=0"
+for /l %%i in (1,1,120) do (
+    if "!BACKEND_READY!"=="0" (
+        powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'http://localhost:8000/api/docs' -UseBasicParsing -TimeoutSec 3; exit 0 } catch { exit 1 }" >nul 2>&1
+        if not errorlevel 1 (
+            set "BACKEND_READY=1"
+        ) else (
+            timeout /t 1 /nobreak >nul
+        )
+    )
+)
+if "!BACKEND_READY!"=="1" (
+    echo  OK backend responded.
+) else (
+    echo  WARNING: backend did not respond within 120s - continuing anyway.
+    echo  Check the "TalentIQ Backend" window for errors.
+)
+echo.
+
 start "TalentIQ Frontend" cmd /k "C:\Temp\tiq_f.cmd"
-echo  Waiting for frontend to start...
-timeout /t 8 /nobreak >nul
+
+echo  Waiting for frontend (http://localhost:5173)...
+set "FRONTEND_READY=0"
+for /l %%i in (1,1,120) do (
+    if "!FRONTEND_READY!"=="0" (
+        powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'http://localhost:5173' -UseBasicParsing -TimeoutSec 3; exit 0 } catch { exit 1 }" >nul 2>&1
+        if not errorlevel 1 (
+            set "FRONTEND_READY=1"
+        ) else (
+            timeout /t 1 /nobreak >nul
+        )
+    )
+)
+if "!FRONTEND_READY!"=="1" (
+    echo  OK frontend responded.
+    timeout /t 2 /nobreak >nul
+) else (
+    echo  WARNING: frontend did not respond within 120s - opening anyway.
+    echo  Check the "TalentIQ Frontend" window for errors.
+)
+
 start "" "http://localhost:5173"
 
 echo.
@@ -153,5 +195,7 @@ echo  App:      http://localhost:5173
 echo  API Docs: http://localhost:8000/api/docs
 echo  ==========================================
 echo.
-echo  Press any key to close this launcher window.
-pause >nul
+echo  This window will close automatically in 8 seconds.
+echo  (Backend and Frontend keep running in their own separate windows.)
+timeout /t 8 >nul
+exit

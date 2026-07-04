@@ -40,6 +40,10 @@ interface AnalysisResult {
     minYearsExperience: number;
     educationRequirement: string;
   };
+  candidateProfile?: {
+    yearsExperience: number;
+    education: string;
+  };
 }
 
 interface AnalyseData extends AnalysisResult {
@@ -548,6 +552,16 @@ export default function CVAnalysisPage() {
                     {result.jdRequirements.location && <span> · {result.jdRequirements.location}</span>}
                   </div>
                 )}
+                {(result.jdRequirements.minYearsExperience > 0 || result.jdRequirements.educationRequirement) && (
+                  <div style={{ display: "flex", gap: 16, fontSize: 12, color: "var(--text-secondary)" }}>
+                    {result.jdRequirements.minYearsExperience > 0 && (
+                      <span><strong>Experience Required:</strong> {result.jdRequirements.minYearsExperience}+ years</span>
+                    )}
+                    {result.jdRequirements.educationRequirement && (
+                      <span><strong>Education Required:</strong> {result.jdRequirements.educationRequirement}</span>
+                    )}
+                  </div>
+                )}
                 {result.jdRequirements.essential?.length > 0 && (
                   <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
                     <span style={{ fontSize: 11, fontWeight: 700, color: "#ef4444", width: 90, flexShrink: 0, paddingTop: 2 }}>ESSENTIAL</span>
@@ -589,6 +603,16 @@ export default function CVAnalysisPage() {
               </div>
               {result.strengthsBreakdown ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  {(result.candidateProfile?.yearsExperience > 0 || result.candidateProfile?.education) && (
+                    <div style={{ display: "flex", gap: 16, fontSize: 12, color: "var(--text-secondary)", paddingBottom: 8, borderBottom: "1px solid var(--border)" }}>
+                      {result.candidateProfile?.yearsExperience > 0 && (
+                        <span><strong>Experience:</strong> {result.candidateProfile.yearsExperience}+ years</span>
+                      )}
+                      {result.candidateProfile?.education && (
+                        <span><strong>Education:</strong> {result.candidateProfile.education}</span>
+                      )}
+                    </div>
+                  )}
                   {[
                     ["Essential Matched", result.strengthsBreakdown.essentialMatched, "#10b981"],
                     ["Technical Skills", result.strengthsBreakdown.technicalSkills, "#3b82f6"],
