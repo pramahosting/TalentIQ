@@ -216,7 +216,7 @@ def enrich_job_record(job: Dict) -> Dict:
 def build_jobintel_agent(groq_api_key: str) -> AgentExecutor:
     if not _GROQ_AVAILABLE or not ChatGroq:
         raise RuntimeError("langchain-groq is not installed. Run: pip install langchain-groq")
-    llm = ChatGroq(api_key=groq_api_key, model=DEFAULT_GROQ_MODEL, temperature=0)
+    llm = ChatGroq(api_key=groq_api_key, model=DEFAULT_GROQ_MODEL, temperature=0, max_tokens=4000, reasoning_format="hidden")
 
     tools = [
         Tool(

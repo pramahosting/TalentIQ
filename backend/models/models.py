@@ -70,6 +70,30 @@ class UserAPIKey(Base):
     user = relationship("User", back_populates="api_keys")
 
 
+class SkillTaxonomy(Base):
+    """A persistent, continuously-growing bank of real skill/requirement
+    terms — accumulated automatically from every successful LLM extraction
+    (JD categorization, candidate strengths) across every module. Unlike a
+    hand-maintained static skill list, this grows to reflect whatever
+    terminology actually shows up in real JDs and resumes over time, and
+    is used two ways: (1) fed back into future LLM prompts as a short
+    "known terms" reference so extractions stay consistent with what's
+    been seen before — especially valuable for a local/smaller Ollama
+    model, which benefits more from concrete grounding than a larger
+    hosted model does — and (2) used to strengthen the deterministic
+    keyword-only fallback matcher, so even the last-resort path (no LLM
+    available at all) gets more comprehensive over time instead of being
+    permanently limited to one fixed, hand-written list."""
+    __tablename__ = "tiq_skill_taxonomy"
+
+    id            = Column(Integer, primary_key=True, index=True)
+    skill_name    = Column(String(200), nullable=False, unique=True, index=True)  # normalized lowercase
+    category      = Column(String(50), nullable=False)  # technical/business/soft/essential/certification
+    frequency     = Column(Integer, default=1, nullable=False)
+    first_seen_at = Column(DateTime, default=datetime.utcnow)
+    last_seen_at  = Column(DateTime, default=datetime.utcnow)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # JOBHUNT
 # ══════════════════════════════════════════════════════════════════════════════

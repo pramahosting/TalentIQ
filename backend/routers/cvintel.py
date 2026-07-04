@@ -15,7 +15,7 @@ from sqlalchemy import select
 from db.database import get_db
 from models.models import User, UserAPIKey, CVAnalysisRecord
 from utils.auth_utils import get_current_user
-from utils.credentials import get_credential, get_groq_model, DEFAULT_GROQ_MODEL
+from utils.credentials import get_credential, get_groq_model, get_all_credentials, DEFAULT_GROQ_MODEL
 from utils.sequencing import next_sequence_number
 
 router = APIRouter()
@@ -386,11 +386,30 @@ def _compute_weighted_score(jd_req: dict, strengths: dict, resume: str) -> dict:
     }
 
 
-async def _score_resume(resume: str, jd: str, groq_key: Optional[str], groq_model: str = DEFAULT_GROQ_MODEL) -> dict:
-    from utils.llm_extraction import extract_jd_requirements_categorized, extract_candidate_strengths
+async def _score_resume(
+    resume: str, jd: str, groq_key: Optional[str], groq_model: str = DEFAULT_GROQ_MODEL,
+    ollama_base_url: Optional[str] = None, ollama_model: Optional[str] = None, db=None,
+) -> dict:
+    from utils.llm_extraction import (
+        extract_jd_requirements_categorized, extract_candidate_strengths,
+        get_taxonomy_hint, enrich_skill_taxonomy,
+    )
 
-    jd_req = await extract_jd_requirements_categorized(jd, groq_key, groq_model)
-    strengths = await extract_candidate_strengths(resume, jd_req, groq_key, groq_model)
+    known_terms = await get_taxonomy_hint(db) if db is not None else []
+    jd_req = await extract_jd_requirements_categorized(
+        jd, groq_key, groq_model, ollama_base_url, ollama_model, known_terms,
+    )
+    strengths = await extract_candidate_strengths(
+        resume, jd_req, groq_key, groq_model, ollama_base_url, ollama_model, known_terms,
+    )
+    if db is not None and strengths.get("ai_powered"):
+        await enrich_skill_taxonomy(db, {
+            "essential": jd_req.get("essential", []),
+            "good_to_have": jd_req.get("good_to_have", []),
+            "technical": strengths.get("technical_skills", []),
+            "business": strengths.get("business_skills", []),
+            "soft": strengths.get("soft_skills", []),
+        })
     scoring = _compute_weighted_score(jd_req, strengths, resume)
     ai_powered = bool(strengths.get("ai_powered", False))
 
@@ -448,6 +467,7 @@ async def _score_resume(resume: str, jd: str, groq_key: Optional[str], groq_mode
         "matchedSkills": matched[:15],
         "missingSkills": missing[:15],
         "aiPowered": ai_powered,
+        "groqModel": groq_model if ai_powered else None,
         # ── Categorized strengths — the actual point of this round's change ──
         "strengthsBreakdown": {
             "essentialMatched": strengths.get("essential_matched", []),
@@ -522,11 +542,17 @@ async def analyze_resume(
 
     # ── Score (structured JD/requirement extraction + deterministic weighting) ──
     groq_key = await get_credential(db, current_user.id, "groq", "api_key")
-
     groq_model = await get_groq_model(db, current_user.id)
-    result = await _score_resume(final_resume, final_jd, groq_key, groq_model)
-    if not groq_key:
-        result["note"] = "Add a Groq API key in Settings for AI-powered requirement extraction and feedback"
+    ollama_creds = await get_all_credentials(db, current_user.id, "ollama")
+    ollama_base_url = ollama_creds.get("base_url")
+    ollama_model = ollama_creds.get("model")
+
+    result = await _score_resume(
+        final_resume, final_jd, groq_key, groq_model,
+        ollama_base_url=ollama_base_url, ollama_model=ollama_model, db=db,
+    )
+    if not groq_key and not ollama_base_url:
+        result["note"] = "Add a Groq API key or a local Ollama instance in Settings for AI-powered requirement extraction and feedback"
 
     return result
 

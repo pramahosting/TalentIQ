@@ -133,20 +133,25 @@ def _call_groq(prompt: str, groq_key: str, groq_model: str = DEFAULT_GROQ_MODEL)
     from langchain_groq import ChatGroq
     from langchain.schema import HumanMessage
 
-    llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.35)
+    llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.35, max_tokens=4000, reasoning_format="hidden")
     resp = llm.invoke([HumanMessage(content=prompt)])
     return resp.content
 
 
-def _call_ollama(prompt: str, base_url: str, model: str) -> str:
+def _call_ollama(prompt: str, base_url: str, model: str, timeout: int = 25) -> str:
     url = base_url.rstrip("/") + "/api/generate"
     # Explicitly bypass any HTTP_PROXY/HTTPS_PROXY env vars for this call —
     # otherwise `requests` can route localhost/private Ollama traffic through
     # a system proxy (which 404s it), even though curl reaches it directly.
+    # timeout is short (25s, not the original 120s) because this is the
+    # LAST link in the Groq-then-Ollama waterfall — if it's going to fail
+    # (unreachable, model not pulled, genuinely hung), waiting 2 minutes to
+    # find that out just guarantees the frontend request times out first
+    # regardless of whether this eventually would have succeeded.
     resp = requests.post(
         url,
         json={"model": model, "prompt": prompt, "stream": False, "format": "json"},
-        timeout=120,
+        timeout=timeout,
         proxies={"http": None, "https": None},
     )
     resp.raise_for_status()

@@ -396,6 +396,8 @@ async def _extract_job_requirements(job: Dict, groq_api_key: Optional[str] = Non
 async def calculate_match(
     resume_text: str, job: Dict, groq_api_key: Optional[str] = None,
     candidate_profile: Optional[Dict] = None, groq_model: str = DEFAULT_GROQ_MODEL,
+    ollama_base_url: Optional[str] = None, ollama_model: Optional[str] = None,
+    known_terms_hint: Optional[list] = None, db=None,
 ) -> Dict:
     """Calculate ATS score and generate insights for a single job.
     Pass a pre-extracted `candidate_profile` (from extract_candidate_profile)
@@ -409,7 +411,12 @@ async def calculate_match(
     vs a resume that says "Dimensional Modeling"). This does mean one LLM
     call per job (matching is inherently job-specific, unlike the
     resume-intrinsic technical/business/soft skills below, which stay
-    cached in candidate_profile and are NOT re-extracted here)."""
+    cached in candidate_profile and are NOT re-extracted here).
+
+    Tries Ollama first when configured (see utils.llm_extraction), then
+    Groq, then a deterministic heuristic. Pass `db` to enrich the shared
+    skill taxonomy after a successful LLM match (best-effort, never blocks
+    or fails the match itself)."""
     if candidate_profile is None:
         candidate_profile = await extract_candidate_profile(resume_text, groq_api_key, groq_model)
 
@@ -417,10 +424,19 @@ async def calculate_match(
     essential = [s for s in requirements.get("essential", requirements.get("required_hard_skills", [])) if s]
     good_to_have = [s for s in requirements.get("good_to_have", []) if s]
 
-    from utils.llm_extraction import extract_candidate_strengths
+    from utils.llm_extraction import extract_candidate_strengths, enrich_skill_taxonomy
     verdicts = await extract_candidate_strengths(
         resume_text, {"essential": essential, "good_to_have": good_to_have}, groq_api_key, groq_model,
+        ollama_base_url=ollama_base_url, ollama_model=ollama_model, known_terms_hint=known_terms_hint,
     )
+    if db is not None and verdicts.get("ai_powered"):
+        await enrich_skill_taxonomy(db, {
+            "essential": essential,
+            "good_to_have": good_to_have,
+            "technical": verdicts.get("technical_skills", []),
+            "business": verdicts.get("business_skills", []),
+            "soft": verdicts.get("soft_skills", []),
+        })
     if "essential_matched" in verdicts or "essential_missing" in verdicts:
         matched = verdicts.get("essential_matched", [])
         missed = verdicts.get("essential_missing", [])
@@ -464,6 +480,7 @@ async def calculate_match(
             "certifications_degrees": candidate_profile.get("certifications_degrees", []),
             "years_experience": candidate_profile.get("years_experience", 0),
             "education": candidate_profile.get("education", ""),
+            "ai_powered": verdicts.get("ai_powered", False),
         },
         # ── Categorized JD requirements ──
         "jd_requirements": {
@@ -501,12 +518,13 @@ def generate_cover_letter(
     # Use LLM if available
     if groq_api_key and _GROQ_AVAILABLE and ChatGroq:
         try:
-            llm = ChatGroq(api_key=groq_api_key, model=groq_model, temperature=0.5)
+            from utils.llm_extraction import _truncate_for_llm
+            llm = ChatGroq(api_key=groq_api_key, model=groq_model, temperature=0.5, max_tokens=4000, reasoning_format="hidden")
             prompt = (
                 f"Write a professional, concise cover letter for {candidate_name} "
                 f"applying for the {job_title} role at {company}.\n\n"
-                f"Job description: {job_desc[:1500]}\n\n"
-                f"Resume highlights: {resume_text[:1500]}\n\n"
+                f"Job description: {_truncate_for_llm(job_desc, 'JD text', 8000)}\n\n"
+                f"Resume highlights: {_truncate_for_llm(resume_text, 'resume text', 8000)}\n\n"
                 "Write 3 paragraphs: opening, strengths alignment, closing. "
                 "Return only the letter text."
             )
@@ -554,7 +572,7 @@ def build_jobhunt_agent(groq_api_key: str) -> AgentExecutor:
     """Build a LangChain ReAct agent wrapping JobHunt tools"""
     if not _GROQ_AVAILABLE or not ChatGroq:
         raise RuntimeError("langchain-groq is not installed. Run: pip install langchain-groq")
-    llm = ChatGroq(api_key=groq_api_key, model=DEFAULT_GROQ_MODEL, temperature=0)
+    llm = ChatGroq(api_key=groq_api_key, model=DEFAULT_GROQ_MODEL, temperature=0, max_tokens=4000, reasoning_format="hidden")
 
     tools = [
         Tool(

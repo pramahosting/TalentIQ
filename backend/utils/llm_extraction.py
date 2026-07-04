@@ -15,12 +15,243 @@ Two extraction calls:
     Skills, Significant Experience, and Certifications & Degrees, plus
     gaps and a summary.
 
-Both fall back to keyword heuristics (no LLM) when no Groq key is
-available, so the app still returns *something* — just less nuanced.
+LLM provider order: Ollama first (a local instance has no per-token cost,
+no external rate limits, and no dependency on a third-party API being up
+— all real pain points hit while relying on Groq), then Groq if Ollama
+isn't configured/reachable or fails, then a deterministic keyword
+heuristic as the last resort so the app always returns *something*.
+
+Every successful extraction (either provider) feeds a persistent, growing
+skill taxonomy (models.SkillTaxonomy) — real terms actually seen in JDs
+and resumes, accumulated over time rather than a fixed hand-written list.
+That taxonomy is used two ways: as a short "known terms" reference
+injected into future prompts (grounding a smaller local model's output in
+terminology it's seen before), and to strengthen the keyword-only
+fallback matcher, so even the no-LLM-available path gets more
+comprehensive the more the system is used.
 """
 import json
 import re
+import requests
 from typing import List, Optional
+
+# ── Document length budget for LLM prompts ──────────────────────────────
+# Rough estimate: ~4 characters per token for English text. Even Groq's
+# more conservative current models support 8K+ token context windows;
+# reserving ~2K tokens for the prompt template itself plus the expected
+# JSON response leaves a safe ~6K tokens (~24,000 characters) of headroom
+# for the actual document. Set a little below that for margin across
+# model variance, since the exact model in use is user-configurable.
+#
+# This used to be several different hardcoded, much smaller limits
+# (1,500-5,000 chars) scattered across CVAnalysis/CandidateLens/JobHunter,
+# which silently dropped entire sections of longer real-world JDs (a
+# Required Qualifications section starting past the cutoff point, for
+# example — every hard requirement in that JD was invisible to the LLM
+# as a result, with no indication anything had been cut at all).
+#
+# IMPORTANT: raising the number alone doesn't make this robust — an
+# unusually long outlier document run at scale (hundreds of JDs against
+# thousands of resumes) could still exceed even a generous fixed limit.
+# _truncate_for_llm() logs a visible warning whenever it actually has to
+# cut something, so that case is never silent again.
+MAX_DOC_CHARS = 20000
+
+# Ollama is a genuinely different situation from Groq, not just "a slower
+# version of the same thing" — it's a local model (often a 7-8B parameter
+# model on modest consumer hardware, sometimes CPU-only) versus Groq's
+# purpose-built fast inference hardware for much larger models. Sending it
+# the same ~20,000-character prompt built for Groq isn't just slower, it
+# can genuinely hang past any reasonable timeout. Ollama gets its own,
+# much smaller budget so it has a realistic chance to actually finish
+# within OLLAMA_TIMEOUT_SECONDS instead of always timing out and paying
+# for the attempt without ever succeeding.
+OLLAMA_DOC_CHARS = 6000
+# A genuinely healthy local model given a 6,000-character prompt should
+# respond within a few seconds on any reasonably modern machine, even
+# CPU-only for a small model. If it's consistently taking longer than
+# this, it's not a "just needs a bit more patience" situation — it's not
+# a viable fast option today, and RACE_PROVIDERS below means that's fine:
+# Groq wins that particular race and the user still gets a fast answer.
+OLLAMA_TIMEOUT_SECONDS = 8
+
+
+def _truncate_for_llm(text: str, label: str, limit: int = MAX_DOC_CHARS) -> str:
+    """Truncates text for an LLM prompt, logging a visible warning if it
+    actually had to cut anything."""
+    if text and len(text) > limit:
+        print(f"  WARNING: {label} is {len(text)} chars — truncating to {limit} for LLM "
+              f"context budget. Content past this point will NOT be seen by extraction.")
+        return text[:limit]
+    return text
+
+
+def _is_token_limit_error(e: Exception) -> bool:
+    """Detects Groq's 413 'Request too large ... tokens per minute (TPM)'
+    error specifically. This is a hard per-request ceiling tied to the
+    account's tier and the specific model in use — unlike a transient 429
+    rate limit (too many requests right now, try again shortly), the exact
+    same oversized request will keep failing every single time no matter
+    how many times it's retried, UNLESS the input itself is made smaller.
+    Some Groq tiers/models have quite low limits (seen as low as 6,000 TPM
+    on the free/on-demand tier for some models) — comfortably fitting a
+    long resume/JD plus prompt instructions can exceed that even though
+    the same content would fit fine on a higher tier or a different model.
+    """
+    msg = str(e).lower()
+    return "413" in msg or "too large" in msg or "tokens per minute" in msg or " tpm" in msg
+
+
+def _call_ollama(prompt: str, base_url: str, model: str, timeout: int = OLLAMA_TIMEOUT_SECONDS) -> str:
+    """Same implementation already proven working in routers/jdcreator.py
+    — kept identical rather than reinvented, including the proxy bypass
+    (without it, `requests` can route localhost/private Ollama traffic
+    through a system proxy, which 404s it even though curl reaches it
+    directly).
+
+    timeout defaults to a short 8s. This is one contender in a RACE
+    against Groq (see race_llm_providers below), not a sequential
+    waterfall step — a slow/unreachable/hung local instance shouldn't add
+    latency to the response at all, since Groq is running at the same
+    time regardless of how long Ollama takes."""
+    url = base_url.rstrip("/") + "/api/generate"
+    resp = requests.post(
+        url,
+        json={"model": model, "prompt": prompt, "stream": False, "format": "json"},
+        timeout=timeout,
+        proxies={"http": None, "https": None},
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("response", "")
+
+
+def race_llm_providers(attempts: dict) -> Optional[tuple]:
+    """Runs multiple LLM provider attempts CONCURRENTLY (in real OS threads,
+    since both `requests` and langchain's ChatGroq.invoke are blocking
+    calls) and returns the result from whichever succeeds FIRST, without
+    waiting for the rest. This is the actual fix for "must respond in
+    seconds, not minutes" — a sequential waterfall (try Ollama, wait for it
+    to fail or time out, THEN try Groq) means total latency is the SUM of
+    every failed attempt plus whichever one eventually works. Racing means
+    total latency is bounded by the FASTEST one that works, regardless of
+    how slow the others are or whether they fail at all — a slow/
+    unreachable local Ollama costs nothing when Groq answers in a couple
+    of seconds.
+
+    attempts: {name: zero-arg callable returning a dict, or raising/
+    returning None on failure}. Returns (name, result) from the first
+    callable to return a truthy result, or None if all of them fail.
+
+    Deliberately does NOT use `with ThreadPoolExecutor() as executor:` —
+    that context manager's __exit__ calls shutdown(wait=True), which
+    blocks until EVERY submitted thread finishes, including ones whose
+    result we no longer need. That would silently defeat the entire point
+    of racing (returning early is worthless if returning still waits for
+    the slow one). Threads that haven't finished when we return keep
+    running in the background until they naturally complete or time out —
+    Python can't forcibly kill a thread — but the function itself returns
+    as soon as we have an answer, which is what actually matters here.
+    """
+    import concurrent.futures
+
+    if not attempts:
+        return None
+    if len(attempts) == 1:
+        name, fn = next(iter(attempts.items()))
+        try:
+            result = fn()
+            return (name, result) if result else None
+        except Exception as e:
+            print(f"  WARNING: {name} provider failed — {type(e).__name__}: {str(e)[:200]}")
+            return None
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(attempts))
+    future_to_name = {executor.submit(fn): name for name, fn in attempts.items()}
+    errors = []
+    winner = None
+    try:
+        for future in concurrent.futures.as_completed(future_to_name):
+            name = future_to_name[future]
+            try:
+                result = future.result()
+                if result:
+                    winner = (name, result)
+                    break
+                errors.append(f"{name}: empty/unparseable response")
+            except Exception as e:
+                errors.append(f"{name}: {type(e).__name__}: {str(e)[:150]}")
+    finally:
+        executor.shutdown(wait=False)
+
+    if winner is None:
+        print(f"  WARNING: all LLM providers failed in race — {'; '.join(errors)}")
+    return winner
+
+
+async def get_taxonomy_hint(db, category: Optional[str] = None, limit: int = 30) -> List[str]:
+    """Returns the most-frequently-seen accumulated skill terms, most
+    common first — injected into future prompts as a short "known terms"
+    reference so extractions (especially from a smaller local Ollama
+    model) stay grounded in terminology the system has actually
+    encountered before, rather than reinventing categorization from
+    scratch on every single call. Safe to call even before the taxonomy
+    table exists or has any rows — returns an empty list rather than
+    raising, so this is never a hard dependency for extraction to work."""
+    try:
+        from sqlalchemy import select
+        from models.models import SkillTaxonomy
+        stmt = select(SkillTaxonomy.skill_name).order_by(SkillTaxonomy.frequency.desc()).limit(limit)
+        if category:
+            stmt = stmt.where(SkillTaxonomy.category == category)
+        rows = (await db.execute(stmt)).scalars().all()
+        return list(rows)
+    except Exception:
+        return []
+
+
+async def enrich_skill_taxonomy(db, skills_by_category: dict) -> None:
+    """Accumulates newly-seen skill/requirement terms from a successful
+    extraction (either provider) into the persistent taxonomy — the more
+    the platform is used, the more comprehensive this gets, entirely from
+    real terms actually seen rather than manual maintenance. Best-effort:
+    failures here are logged but never allowed to break the calling
+    extraction, since this is a background enrichment step, not a
+    required part of returning a result.
+
+    skills_by_category: e.g. {"technical": [...], "business": [...],
+    "soft": [...], "essential": [...], "certification": [...]}
+    """
+    try:
+        from sqlalchemy import select
+        from datetime import datetime
+        from models.models import SkillTaxonomy
+
+        now = datetime.utcnow()
+        for category, terms in (skills_by_category or {}).items():
+            for term in (terms or []):
+                normalized = (term or "").strip().lower()
+                if not normalized or len(normalized) > 200:
+                    continue
+                existing = (await db.execute(
+                    select(SkillTaxonomy).where(SkillTaxonomy.skill_name == normalized)
+                )).scalar_one_or_none()
+                if existing:
+                    existing.frequency += 1
+                    existing.last_seen_at = now
+                else:
+                    db.add(SkillTaxonomy(
+                        skill_name=normalized, category=category,
+                        frequency=1, first_seen_at=now, last_seen_at=now,
+                    ))
+        await db.commit()
+    except Exception as e:
+        print(f"  WARNING: enrich_skill_taxonomy failed (non-fatal, continuing) — {type(e).__name__}: {str(e)[:200]}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
 
 _PLACEHOLDER_VALUES = {
     "nil", "n/a", "na", "none", "-", "--", "tbd", "tba", "blank", "n.a.",
@@ -64,6 +295,8 @@ def _parse_json_response(raw: str) -> Optional[dict]:
 
 async def extract_jd_requirements_categorized(
     jd_text: str, groq_key: Optional[str], groq_model: str,
+    ollama_base_url: Optional[str] = None, ollama_model: Optional[str] = None,
+    known_terms_hint: Optional[List[str]] = None,
 ) -> dict:
     """Returns:
     {"role": str, "location": str, "company": str,
@@ -73,14 +306,28 @@ async def extract_jd_requirements_categorized(
     experience/education requirements — not skills only — since a JD's
     "5+ years in cloud architecture" or "Bachelor's in Computer Science" is
     just as much a requirement as a named tool.
-    """
-    if groq_key:
-        try:
-            from langchain_groq import ChatGroq
-            from langchain.schema import HumanMessage
 
-            llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.1)
-            prompt = f"""You are a senior recruiter reading a job description. Extract the
+    Races Ollama and Groq concurrently when both are configured — total
+    latency is bounded by whichever responds first, not the sum of a
+    failed/slow attempt plus the other (see race_llm_providers). Falls to
+    a deterministic keyword heuristic only if every configured provider
+    fails. known_terms_hint (from the accumulated skill taxonomy — see
+    get_taxonomy_hint) is injected as a short consistency reference so
+    extractions align with terminology already seen, most valuable for a
+    smaller local Ollama model.
+    """
+    hint_block = ""
+    if known_terms_hint:
+        hint_block = (
+            "\n\nFor consistency with previous extractions on this platform, here are terms "
+            "commonly seen before — if the JD clearly refers to one of these, use the SAME "
+            "wording rather than inventing a slightly different phrasing (but only apply ones "
+            "that genuinely fit; do not force-fit unrelated terms):\n"
+            + ", ".join(known_terms_hint[:30])
+        )
+
+    def _build_prompt(jd_limit: int) -> str:
+        return f"""You are a senior recruiter reading a job description. Extract the
 fields below precisely — if something genuinely isn't stated, use an empty
 string/value rather than guessing, and never return placeholder text like
 "Nil"/"N/A"/"TBD" as if it were a real value.
@@ -91,9 +338,10 @@ the JD phrases it:
 - "essential": stated as required / must-have / mandatory
 - "good_to_have": stated as preferred / desirable / advantageous, not mandatory
 - "optional": mentioned only in passing, or a minor/bonus item
+{hint_block}
 
 Job Description:
-\"\"\"{jd_text[:3500]}\"\"\"
+\"\"\"{_truncate_for_llm(jd_text, "JD text", jd_limit)}\"\"\"
 
 Return ONLY valid JSON, no markdown, no commentary:
 {{
@@ -106,22 +354,70 @@ Return ONLY valid JSON, no markdown, no commentary:
   "min_years_experience": <integer, 0 if not stated>,
   "education_requirement": "<short phrase, or empty string>"
 }}"""
-            resp = llm.invoke([HumanMessage(content=prompt)])
-            data = _parse_json_response(resp.content)
-            if data and (data.get("essential") or data.get("good_to_have")):
-                return {
-                    "role": _clean_field(data.get("role")),
-                    "location": _clean_field(data.get("location")),
-                    "company": _clean_field(data.get("company")),
-                    "essential": [s for s in data.get("essential", []) if s][:20],
-                    "good_to_have": [s for s in data.get("good_to_have", []) if s][:12],
-                    "optional": [s for s in data.get("optional", []) if s][:8],
-                    "min_years_experience": int(data.get("min_years_experience") or 0),
-                    "education_requirement": _clean_field(data.get("education_requirement")),
-                    "ai_powered": True,
-                }
-        except Exception:
-            pass
+
+    def _build_result(data: dict) -> Optional[dict]:
+        if data and (data.get("essential") or data.get("good_to_have")):
+            return {
+                "role": _clean_field(data.get("role")),
+                "location": _clean_field(data.get("location")),
+                "company": _clean_field(data.get("company")),
+                "essential": [s for s in data.get("essential", []) if s][:20],
+                "good_to_have": [s for s in data.get("good_to_have", []) if s][:12],
+                "optional": [s for s in data.get("optional", []) if s][:8],
+                "min_years_experience": int(data.get("min_years_experience") or 0),
+                "education_requirement": _clean_field(data.get("education_requirement")),
+                "ai_powered": True,
+            }
+        return None
+
+    def _try_ollama() -> Optional[dict]:
+        ollama_mdl = ollama_model or "llama3"
+        raw = _call_ollama(_build_prompt(OLLAMA_DOC_CHARS), ollama_base_url, ollama_mdl)
+        return _build_result(_parse_json_response(raw))
+
+    def _try_groq() -> Optional[dict]:
+        from langchain_groq import ChatGroq
+        from langchain.schema import HumanMessage
+
+        # Retries with a shrinking budget specifically on a 413 token-limit
+        # error rather than giving up immediately — some Groq tiers have
+        # per-request limits (seen as low as 6,000 TPM) that a long JD can
+        # exceed even after the normal, generous truncation. This whole
+        # retry sequence happens inside Groq's single "slot" in the race
+        # below — Ollama isn't held up waiting for it.
+        last_error = None
+        for jd_limit in (MAX_DOC_CHARS, 6000, 2500):
+            try:
+                llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0, max_tokens=4000, reasoning_format="hidden")
+                resp = llm.invoke([HumanMessage(content=_build_prompt(jd_limit))])
+                result = _build_result(_parse_json_response(resp.content))
+                if result:
+                    return result
+                return None
+            except Exception as e:
+                last_error = e
+                if _is_token_limit_error(e) and jd_limit != 2500:
+                    print(f"  WARNING: extract_jd_requirements_categorized request too large at {jd_limit}-char JD budget, retrying smaller — {str(e)[:200]}")
+                    continue
+                raise
+        if last_error:
+            raise last_error
+        return None
+
+    # ── Race Ollama and Groq concurrently — total latency is bounded by
+    # whichever is faster, not the sum of a failed attempt plus the other.
+    attempts = {}
+    if ollama_base_url:
+        attempts["ollama"] = _try_ollama
+    if groq_key:
+        attempts["groq"] = _try_groq
+    if attempts:
+        import asyncio
+        outcome = await asyncio.to_thread(race_llm_providers, attempts)
+        if outcome:
+            _, result = outcome
+            return result
+
     return _fallback_jd_requirements(jd_text)
 
 
@@ -155,6 +451,8 @@ def _fallback_jd_requirements(jd_text: str, domain_skills: Optional[List[str]] =
 
 async def extract_candidate_strengths(
     resume_text: str, jd_requirements: dict, groq_key: Optional[str], groq_model: str,
+    ollama_base_url: Optional[str] = None, ollama_model: Optional[str] = None,
+    known_terms_hint: Optional[List[str]] = None,
 ) -> dict:
     """Returns:
     {"essential_matched": [...], "essential_missing": [...], "good_to_have_matched": [...],
@@ -172,23 +470,46 @@ async def extract_candidate_strengths(
     Modeling" — a specific technique that IS a form of it). Neither a
     literal substring match nor a "does every word appear somewhere" check
     can reliably judge either case — that needs actual reading
-    comprehension, which is exactly what asking the LLM to judge each item
-    individually gives us, instead of discarding that judgment for a
-    cruder deterministic fallback.
+    comprehension.
+
+    The verdicts come back as a compact boolean array (one true/false per
+    requirement, in order) rather than a numbered object per item
+    ({"n": 1, "matched": true}) — functionally identical accuracy, but a
+    fraction of the output tokens. That matters a lot in practice: with a
+    reasoning-capable model, a longer/more complex required output format
+    is more likely to exhaust the model's response budget on reasoning
+    before it finishes writing the JSON, which silently drops this whole
+    call down to the much weaker keyword-only fallback — at that point
+    "more accurate in theory" loses to "actually completes successfully"
+    most of the time.
+
+    Races Ollama and Groq concurrently when both are configured — total
+    latency is bounded by whichever responds first (see
+    race_llm_providers), not the sum of a slow/failed attempt plus the
+    other. Falls to the deterministic heuristic only if every configured
+    provider fails. known_terms_hint (from the accumulated skill taxonomy)
+    nudges the categorization toward terminology already seen before.
     """
     essential = [s for s in jd_requirements.get("essential", []) if s][:15]
     good_to_have = [s for s in jd_requirements.get("good_to_have", []) if s][:10]
 
-    if groq_key and (essential or good_to_have):
-        try:
-            from langchain_groq import ChatGroq
-            from langchain.schema import HumanMessage
+    if not essential and not good_to_have:
+        return _fallback_candidate_strengths(resume_text, jd_requirements)
 
-            llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.1)
-            essential_block = "\n".join(f"{i+1}. {r}" for i, r in enumerate(essential)) or "(none)"
-            good_block = "\n".join(f"{i+1}. {r}" for i, r in enumerate(good_to_have)) or "(none)"
+    essential_block = "\n".join(f"{i+1}. {r}" for i, r in enumerate(essential)) or "(none)"
+    good_block = "\n".join(f"{i+1}. {r}" for i, r in enumerate(good_to_have)) or "(none)"
+    hint_block = ""
+    if known_terms_hint:
+        hint_block = (
+            "\n\nFor consistency with previous extractions on this platform, here are skill "
+            "terms commonly seen before — if the resume clearly demonstrates one of these, use "
+            "the SAME wording rather than a slightly different phrasing (only apply ones that "
+            "genuinely fit; do not force-fit unrelated terms):\n"
+            + ", ".join(known_terms_hint[:30])
+        )
 
-            prompt = f"""You are an expert recruiter evaluating a candidate's resume against a
+    def _build_prompt(resume_limit: int) -> str:
+        return f"""You are an expert recruiter evaluating a candidate's resume against a
 specific job's requirements. For EACH numbered requirement below, judge
 whether the resume provides genuine evidence for it — reading for meaning
 and equivalent experience, not exact wording. Some requirements are
@@ -201,6 +522,7 @@ Modeling", "Data Vault", or "Star Schema design" DOES satisfy a
 requirement for "Data Modeling", since those are specific forms of it.
 Only mark something matched if the resume genuinely supports it — do not
 be generous with unrelated content.
+{hint_block}
 
 ESSENTIAL REQUIREMENTS:
 {essential_block}
@@ -209,16 +531,17 @@ GOOD-TO-HAVE REQUIREMENTS:
 {good_block}
 
 RESUME:
-\"\"\"{resume_text[:4500]}\"\"\"
+\"\"\"{_truncate_for_llm(resume_text, "resume text", resume_limit)}\"\"\"
 
-Return ONLY valid JSON, no markdown, no commentary. essential_verdicts must
-have exactly {len(essential)} entries (one per essential requirement above,
-numbered 1 to {len(essential)}) and good_to_have_verdicts must have exactly
-{len(good_to_have)} entries — do not abbreviate or use "..." anywhere in
-your response, list every single entry explicitly:
+Return ONLY valid JSON, no markdown, no commentary. "essential_matched" must
+be a flat array of exactly {len(essential)} booleans, one per essential
+requirement above IN THE SAME ORDER (true if genuinely matched, false if
+not) — not an object, not a list of names, just booleans in order.
+Likewise "good_to_have_matched" must have exactly {len(good_to_have)}
+booleans in order:
 {{
-  "essential_verdicts": [{{"n": 1, "matched": true}}, {{"n": 2, "matched": false}}],
-  "good_to_have_verdicts": [{{"n": 1, "matched": true}}],
+  "essential_matched": [true, false, true],
+  "good_to_have_matched": [true, false],
   "technical_skills": ["<candidate's technical/hard skills relevant to this role — tools, languages, platforms>"],
   "business_skills": ["<business/domain skills — stakeholder management, budgeting, domain expertise, strategy>"],
   "soft_skills": ["<interpersonal skills evidenced in the resume — leadership, communication, problem solving>"],
@@ -228,31 +551,81 @@ your response, list every single entry explicitly:
   "years_experience": <integer, best estimate>,
   "education": "<highest qualification found, or empty string>"
 }}"""
-            resp = llm.invoke([HumanMessage(content=prompt)])
-            data = _parse_json_response(resp.content)
-            if data and (data.get("essential_verdicts") is not None or data.get("technical_skills")):
-                ev = {v.get("n"): bool(v.get("matched")) for v in (data.get("essential_verdicts") or []) if isinstance(v, dict)}
-                gv = {v.get("n"): bool(v.get("matched")) for v in (data.get("good_to_have_verdicts") or []) if isinstance(v, dict)}
-                essential_matched = [r for i, r in enumerate(essential) if ev.get(i + 1)]
-                essential_missing = [r for i, r in enumerate(essential) if not ev.get(i + 1)]
-                good_matched = [r for i, r in enumerate(good_to_have) if gv.get(i + 1)]
-                return {
-                    "essential_matched": essential_matched[:15],
-                    "essential_missing": essential_missing[:15],
-                    "good_to_have_matched": good_matched[:10],
-                    "technical_skills": [s for s in data.get("technical_skills", []) if s][:10],
-                    "business_skills": [s for s in data.get("business_skills", []) if s][:8],
-                    "soft_skills": [s for s in data.get("soft_skills", []) if s][:8],
-                    "significant_experience": [s for s in data.get("significant_experience", []) if s][:6],
-                    "certifications_degrees": [s for s in data.get("certifications_degrees", []) if s][:8],
-                    "gaps": essential_missing[:10],
-                    "summary": (data.get("summary") or "").strip(),
-                    "years_experience": int(data.get("years_experience") or 0),
-                    "education": _clean_field(data.get("education")),
-                    "ai_powered": True,
-                }
-        except Exception:
-            pass
+
+    def _build_result(data: dict) -> Optional[dict]:
+        if not data or (data.get("essential_matched") is None and not data.get("technical_skills")):
+            return None
+        ev = data.get("essential_matched") or []
+        gv = data.get("good_to_have_matched") or []
+        essential_matched = [r for i, r in enumerate(essential) if i < len(ev) and ev[i]]
+        essential_missing = [r for i, r in enumerate(essential) if not (i < len(ev) and ev[i])]
+        good_matched = [r for i, r in enumerate(good_to_have) if i < len(gv) and gv[i]]
+        return {
+            "essential_matched": essential_matched[:15],
+            "essential_missing": essential_missing[:15],
+            "good_to_have_matched": good_matched[:10],
+            "technical_skills": [s for s in data.get("technical_skills", []) if s][:10],
+            "business_skills": [s for s in data.get("business_skills", []) if s][:8],
+            "soft_skills": [s for s in data.get("soft_skills", []) if s][:8],
+            "significant_experience": [s for s in data.get("significant_experience", []) if s][:6],
+            "certifications_degrees": [s for s in data.get("certifications_degrees", []) if s][:8],
+            "gaps": essential_missing[:10],
+            "summary": (data.get("summary") or "").strip(),
+            "years_experience": int(data.get("years_experience") or 0),
+            "education": _clean_field(data.get("education")),
+            "ai_powered": True,
+        }
+
+    def _try_ollama() -> Optional[dict]:
+        ollama_mdl = ollama_model or "llama3"
+        raw = _call_ollama(_build_prompt(OLLAMA_DOC_CHARS), ollama_base_url, ollama_mdl)
+        return _build_result(_parse_json_response(raw))
+
+    def _try_groq() -> Optional[dict]:
+        from langchain_groq import ChatGroq
+        from langchain.schema import HumanMessage
+
+        # A 413 "request too large / tokens per minute" error is a hard
+        # per-request ceiling for this account tier + model — retrying the
+        # SAME request changes nothing, it needs to be smaller. Some Groq
+        # tiers have quite low limits (seen as low as 6,000 TPM), which a
+        # long resume plus JD requirements plus prompt instructions can
+        # exceed even after truncation to the normal (generous) budget.
+        # This whole retry sequence happens inside Groq's single "slot" in
+        # the race below — Ollama isn't held up waiting for it.
+        last_error = None
+        for resume_limit in (MAX_DOC_CHARS, 6000, 2500):
+            try:
+                llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0, max_tokens=4000, reasoning_format="hidden")
+                resp = llm.invoke([HumanMessage(content=_build_prompt(resume_limit))])
+                result = _build_result(_parse_json_response(resp.content))
+                if result:
+                    return result
+                return None
+            except Exception as e:
+                last_error = e
+                if _is_token_limit_error(e) and resume_limit != 2500:
+                    print(f"  WARNING: extract_candidate_strengths request too large at {resume_limit}-char resume budget, retrying smaller — {str(e)[:200]}")
+                    continue
+                raise
+        if last_error:
+            raise last_error
+        return None
+
+    # ── Race Ollama and Groq concurrently — total latency is bounded by
+    # whichever is faster, not the sum of a failed attempt plus the other.
+    attempts = {}
+    if ollama_base_url:
+        attempts["ollama"] = _try_ollama
+    if groq_key:
+        attempts["groq"] = _try_groq
+    if attempts:
+        import asyncio
+        outcome = await asyncio.to_thread(race_llm_providers, attempts)
+        if outcome:
+            _, result = outcome
+            return result
+
     return _fallback_candidate_strengths(resume_text, jd_requirements)
 
 
@@ -270,13 +643,13 @@ async def extract_candidate_strengths_general(
             from langchain_groq import ChatGroq
             from langchain.schema import HumanMessage
 
-            llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.15)
+            llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0, max_tokens=4000, reasoning_format="hidden")
             prompt = f"""You are an expert recruiter. Read the resume below and produce an
 evidence-based categorized breakdown. Only credit something the resume
 actually supports — do not invent skills or experience it doesn't contain.
 
 RESUME:
-\"\"\"{resume_text[:4500]}\"\"\"
+\"\"\"{_truncate_for_llm(resume_text, "resume text")}\"\"\"
 
 Return ONLY valid JSON, no markdown, no commentary:
 {{
@@ -301,8 +674,8 @@ Return ONLY valid JSON, no markdown, no commentary:
                     "education": _clean_field(data.get("education")),
                     "ai_powered": True,
                 }
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  WARNING: extract_candidate_strengths_general LLM call failed, falling back to keyword heuristic — {type(e).__name__}: {str(e)[:300]}")
     return _fallback_candidate_strengths(resume_text, {"essential": []})
 
 

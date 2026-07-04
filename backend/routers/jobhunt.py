@@ -20,7 +20,7 @@ from schemas.schemas import (
     MatchRequest, JobMatchOut, JobOut,
 )
 from utils.auth_utils import get_current_user
-from utils.credentials import get_credential, get_groq_model
+from utils.credentials import get_credential, get_groq_model, get_all_credentials
 from utils.sequencing import next_sequence_number
 from agents.jobhunt_agent import (
     scrape_jobs_adzuna, parse_resume_text,
@@ -315,6 +315,11 @@ async def match_resume(
 
     groq_key = await _get_user_api_key(current_user.id, "groq", "api_key", db)
     groq_model = await get_groq_model(db, current_user.id)
+    ollama_creds = await get_all_credentials(db, current_user.id, "ollama")
+    ollama_base_url = ollama_creds.get("base_url")
+    ollama_model = ollama_creds.get("model")
+    from utils.llm_extraction import get_taxonomy_hint
+    known_terms = await get_taxonomy_hint(db)
 
     # Extract the candidate's profile ONCE for this batch — reused across
     # every job below instead of re-extracting the same resume repeatedly.
@@ -328,7 +333,11 @@ async def match_resume(
             "description": job.description or "",
             "apply_link": job.apply_link,
         }
-        match_data = await calculate_match(resume.raw_text or "", job_dict, groq_key, candidate_profile, groq_model)
+        match_data = await calculate_match(
+            resume.raw_text or "", job_dict, groq_key, candidate_profile, groq_model,
+            ollama_base_url=ollama_base_url, ollama_model=ollama_model,
+            known_terms_hint=known_terms, db=db,
+        )
         cover = generate_cover_letter(
             resume.raw_text or "", resume.parsed_data or {}, job_dict, groq_key, groq_model
         )

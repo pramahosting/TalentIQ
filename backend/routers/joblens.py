@@ -13,6 +13,7 @@ import io
 import re
 import os
 import json
+import asyncio
 import secrets
 import smtplib
 import requests
@@ -304,8 +305,9 @@ async def extract_jd_details(jd_text: str, groq_key: str, groq_model: str = DEFA
     try:
         from langchain_groq import ChatGroq
         from langchain.schema import HumanMessage
+        from utils.llm_extraction import _truncate_for_llm
 
-        llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.1)
+        llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.1, max_tokens=4000, reasoning_format="hidden")
         prompt = f"""You are a recruitment AI assistant. Read the job description below and
 extract these fields precisely. If a field genuinely isn't stated anywhere
 in the text, return an empty string for it — do NOT guess, and do NOT
@@ -319,7 +321,7 @@ one of three tiers, based on how the JD phrases it:
 - "optional": mentioned only in passing, or a minor/bonus item
 
 Job Description:
-\"\"\"{jd_text[:3000]}\"\"\"
+\"\"\"{_truncate_for_llm(jd_text, "JD text")}\"\"\"
 
 Return ONLY valid JSON in this format:
 {{
@@ -331,9 +333,11 @@ Return ONLY valid JSON in this format:
   "optional": ["skill5"]
 }}"""
 
+        from utils.llm_extraction import _parse_json_response
         resp = llm.invoke([HumanMessage(content=prompt)])
-        raw = resp.content.strip().replace("```json", "").replace("```", "").strip()
-        data = json.loads(raw)
+        data = _parse_json_response(resp.content)
+        if data is None:
+            raise ValueError(f"LLM returned unparseable/empty response (length {len(resp.content)})")
         essential = [s.lower().strip() for s in data.get("essential", []) if s]
         good_to_have = [s.lower().strip() for s in data.get("good_to_have", []) if s]
         optional = [s.lower().strip() for s in data.get("optional", []) if s]
@@ -346,7 +350,8 @@ Return ONLY valid JSON in this format:
             "optional": optional,
             "skills": list(dict.fromkeys(essential + good_to_have + optional)),  # flat list — existing scoring logic
         }
-    except Exception:
+    except Exception as e:
+        print(f"  WARNING: extract_jd_details LLM call failed, falling back to keyword heuristic — {type(e).__name__}: {str(e)[:300]}")
         return _heuristic_jd_details(jd_text)
 
 
@@ -586,15 +591,16 @@ async def generate_questions(jd_text: str, candidate_name: str, matched_skills: 
     try:
         from langchain_groq import ChatGroq
         from langchain.schema import HumanMessage
+        from utils.llm_extraction import _truncate_for_llm, _parse_json_response
 
-        llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.4)
+        llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.4, max_tokens=4000, reasoning_format="hidden")
         skills_str = ", ".join(matched_skills[:8]) if matched_skills else "relevant skills"
         prompt = f"""You are a recruitment AI assistant.
 Generate exactly 5 interview questions for {candidate_name} based on the Job Description below.
 Focus on required skills ({skills_str}), tools, and responsibilities.
 
 Job Description:
-\"\"\"{jd_text[:1500]}\"\"\"
+\"\"\"{_truncate_for_llm(jd_text, "JD text", 8000)}\"\"\"
 
 Return ONLY valid JSON:
 {{
@@ -602,8 +608,9 @@ Return ONLY valid JSON:
 }}"""
 
         resp = llm.invoke([HumanMessage(content=prompt)])
-        raw = resp.content.strip().replace("```json", "").replace("```", "").strip()
-        data = json.loads(raw)
+        data = _parse_json_response(resp.content)
+        if data is None:
+            raise ValueError(f"LLM returned unparseable/empty response (length {len(resp.content)})")
         return data.get("questions", [])[:5]
     except Exception:
         return _default_questions(candidate_name, matched_skills)
@@ -636,8 +643,9 @@ async def generate_resume_summary(cv_text: str, groq_key: Optional[str], groq_mo
         try:
             from langchain_groq import ChatGroq
             from langchain.schema import HumanMessage
+            from utils.llm_extraction import _truncate_for_llm, _parse_json_response
 
-            llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.2)
+            llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.2, max_tokens=4000, reasoning_format="hidden")
             prompt = f"""You are a recruitment analyst producing a sharp, specific candidate
 summary for a recruiter who is short on time. Read the resume below and
 extract the MOST relevant and important points — prioritize specifics
@@ -645,7 +653,7 @@ extract the MOST relevant and important points — prioritize specifics
 generic statements. Do not invent facts the resume doesn't support.
 
 Resume:
-\"\"\"{cv_text[:5000]}\"\"\"
+\"\"\"{_truncate_for_llm(cv_text, "resume text")}\"\"\"
 
 Return ONLY valid JSON, no markdown, no commentary, in this exact format:
 {{
@@ -665,11 +673,9 @@ Rules:
 - Every bullet must be a full, specific sentence a recruiter could act on — not a category label restated as a sentence"""
 
             resp = llm.invoke([HumanMessage(content=prompt)])
-            raw = resp.content.strip().replace("```json", "").replace("```", "").strip()
-            start, end = raw.find("{"), raw.rfind("}")
-            if start != -1 and end != -1:
-                raw = raw[start:end + 1]
-            data = json.loads(raw)
+            data = _parse_json_response(resp.content)
+            if data is None:
+                raise ValueError(f"LLM returned unparseable/empty response (length {len(resp.content)})")
             result = {
                 "experience": [s for s in data.get("experience", []) if s][:5],
                 "skills": [s for s in data.get("skills", []) if s][:4],
@@ -872,6 +878,11 @@ async def run_joblens(
     # ── Get Groq key (own key first, falls back to admin-configured global) ──
     groq_key = await get_credential(db, current_user.id, "groq", "api_key")
     groq_model = await get_groq_model(db, current_user.id)
+    ollama_creds = await get_all_credentials(db, current_user.id, "ollama")
+    ollama_base_url = ollama_creds.get("base_url")
+    ollama_model = ollama_creds.get("model")
+    from utils.llm_extraction import get_taxonomy_hint, enrich_skill_taxonomy
+    known_terms = await get_taxonomy_hint(db)
 
     # ── Extract JD details: role, location, company, categorized skills (LLM or heuristic) ──
     # If this session was started from an existing JD Management record that
@@ -925,6 +936,21 @@ async def run_joblens(
     except Exception as e:
         raise HTTPException(500, f"DB error creating session: {str(e)}")
 
+    # Bounds actual Groq API calls directly — the real rate-limit concern.
+    # Previously there were two separate, uncoordinated concurrency limits
+    # (how many candidates process at once, and — as of the last fix — how
+    # many calls run per candidate) that could MULTIPLY against each other:
+    # 4 candidates x 3 concurrent calls each = up to 12 simultaneous Groq
+    # requests for one batch, an easy way to trip rate limits that neither
+    # limit alone would suggest. One shared semaphore around every actual
+    # Groq call means peak concurrency is bounded by this single number,
+    # no matter how many candidates or calls-per-candidate are involved.
+    _groq_semaphore = asyncio.Semaphore(4)
+
+    async def _with_groq_limit(coro):
+        async with _groq_semaphore:
+            return await coro
+
     # ── Score each CV ──────────────────────────────────────────────────
     async def _score_and_build_candidate(
         content: bytes, filename: str,
@@ -936,16 +962,34 @@ async def run_joblens(
 
         info = extract_candidate_info(cv_text, filename)
 
-        # Categorized strengths breakdown, including per-item essential/
-        # good-to-have verdicts — this now drives BOTH the display panel
-        # AND the actual score/matched/missing below, instead of being
-        # computed separately from a weaker deterministic path.
+        # These three calls are independent of each other's OUTPUTS (questions
+        # generation previously waited on the matched-skills result from
+        # strengths extraction purely for a "focus on these skills" hint —
+        # the JD's own essential/good_to_have list serves that just as well
+        # and is known immediately, with no need to wait). Running them
+        # concurrently instead of sequentially cuts per-candidate latency
+        # from ~3x a single Groq call to ~1x the slowest of the three —
+        # on top of the existing between-candidate concurrency, this is
+        # where the real "3 resumes taking forever" time was going.
         from utils.llm_extraction import extract_candidate_strengths
-        strengths_breakdown = await extract_candidate_strengths(
+        jd_focus_skills = (jd_details.get("essential", []) + jd_details.get("good_to_have", []))[:8]
+
+        strengths_task = _with_groq_limit(extract_candidate_strengths(
             cv_text,
             {"essential": jd_details.get("essential", []), "good_to_have": jd_details.get("good_to_have", [])},
             groq_key, groq_model,
+            ollama_base_url=ollama_base_url, ollama_model=ollama_model, known_terms_hint=known_terms,
+        ))
+        questions_task = (
+            _with_groq_limit(generate_questions(final_jd, info["name"], jd_focus_skills, groq_key, groq_model))
+            if groq_key else asyncio.sleep(0, result=None)
         )
+        summary_task = _with_groq_limit(generate_resume_summary(cv_text, groq_key, groq_model))
+
+        strengths_breakdown, questions_result, resume_summary = await asyncio.gather(
+            strengths_task, questions_task, summary_task,
+        )
+
         result = _score_from_verdicts(
             strengths_breakdown, cv_text,
             len(jd_details.get("essential", [])), len(jd_details.get("good_to_have", [])),
@@ -958,12 +1002,7 @@ async def run_joblens(
         elif score >= low_threshold:
             status = "Review"
 
-        if groq_key:
-            questions = await generate_questions(final_jd, info["name"], result["matched"], groq_key, groq_model)
-        else:
-            questions = _default_questions(info["name"], result["matched"])
-
-        resume_summary = await generate_resume_summary(cv_text, groq_key, groq_model)
+        questions = questions_result if groq_key else _default_questions(info["name"], result["matched"])
 
         fname_lower = (filename or "").lower()
         if fname_lower.endswith(".pdf"):
@@ -1007,20 +1046,44 @@ async def run_joblens(
                 "certificationsDegrees": strengths_breakdown.get("certifications_degrees", []),
                 "yearsExperience": strengths_breakdown.get("years_experience", 0),
                 "education": strengths_breakdown.get("education", ""),
+                "aiPowered": strengths_breakdown.get("ai_powered", False),
             },
         )
 
     candidates = []
-    for upload in cv_files:
-        try:
-            content = await upload.read()
-            candidate = await _score_and_build_candidate(content, upload.filename)
-            if candidate:
-                db.add(candidate)
-                candidates.append(candidate)
-        except Exception as e:
-            print(f"Error processing {upload.filename}: {e}")
-            continue
+    # This bounds how many candidates are processed "in flight" at once —
+    # local work (file parsing, regex extraction) is cheap, so this can be
+    # looser than the real rate-limit concern. Actual Groq API calls are
+    # bounded separately by _groq_semaphore above, regardless of how many
+    # candidates are in flight here; their calls simply queue for a slot.
+    _score_semaphore = asyncio.Semaphore(8)
+
+    async def _score_with_limit(content: bytes, filename: str):
+        async with _score_semaphore:
+            try:
+                return await _score_and_build_candidate(content, filename)
+            except Exception as e:
+                print(f"Error processing {filename}: {e}")
+                return None
+
+    upload_payloads = [(await upload.read(), upload.filename) for upload in cv_files]
+    scored = await asyncio.gather(*[_score_with_limit(content, filename) for content, filename in upload_payloads])
+    for candidate in scored:
+        if candidate:
+            db.add(candidate)
+            candidates.append(candidate)
+            # Enrichment does its own db.commit() — done here, sequentially,
+            # after all concurrent scoring has finished, rather than inside
+            # _score_and_build_candidate itself (which runs concurrently
+            # across candidates — committing from multiple coroutines on
+            # the same session at once is not safe with AsyncSession).
+            sb = candidate.strengths_breakdown or {}
+            if sb.get("aiPowered"):
+                await enrich_skill_taxonomy(db, {
+                    "technical": sb.get("technicalSkills", []),
+                    "business": sb.get("businessSkills", []),
+                    "soft": sb.get("softSkills", []),
+                })
 
     # ── Score candidates sourced from Vendor Management submissions ──────
     for tc in source_candidates:
@@ -1043,6 +1106,13 @@ async def run_joblens(
                 candidate.phone = candidate.phone or tc.phone or ""
                 db.add(candidate)
                 candidates.append(candidate)
+                sb = candidate.strengths_breakdown or {}
+                if sb.get("aiPowered"):
+                    await enrich_skill_taxonomy(db, {
+                        "technical": sb.get("technicalSkills", []),
+                        "business": sb.get("businessSkills", []),
+                        "soft": sb.get("softSkills", []),
+                    })
         except Exception as e:
             print(f"Error processing vendor candidate {tc.id}: {e}")
             continue
@@ -1053,10 +1123,18 @@ async def run_joblens(
 
     candidates.sort(key=lambda c: c.ats_score, reverse=True)
 
+    # Whether a Groq key EXISTS says nothing about whether extraction
+    # actually SUCCEEDED via it — a bad model/expired key/unreachable
+    # Ollama fallback all silently degrade to weak keyword-only matching
+    # while a key is still technically configured. Report real per-candidate
+    # outcomes instead, so a silent degradation is never invisible again.
+    ai_powered_flags = [bool((c.strengths_breakdown or {}).get("aiPowered")) for c in candidates]
+
     return {
         "session_id": session.id,
         "jd_skills":  jd_skills[:30],
-        "ai_powered": groq_key is not None,
+        "ai_powered": all(ai_powered_flags) if ai_powered_flags else (groq_key is not None),
+        "ai_powered_partial": 0 < sum(ai_powered_flags) < len(ai_powered_flags),
         "total":      len(candidates),
         "candidates": [_fmt(c) for c in candidates],
     }
@@ -1341,7 +1419,7 @@ async def _analyze_transcript(
     from langchain_groq import ChatGroq
     from langchain.schema import HumanMessage
 
-    llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.2)
+    llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.2, max_tokens=4000, reasoning_format="hidden")
     questions_block = "\n".join(f"{i+1}. {q}" for i, q in enumerate(questions)) or "(not recorded)"
     prompt = f"""You are an experienced hiring manager reviewing a recorded video
 interview transcript for {candidate_name}. Be fair and evidence-based — only
@@ -1366,9 +1444,11 @@ no markdown, no commentary:
   "summary": "<3-4 sentence overall assessment>"
 }}"""
     resp = llm.invoke([HumanMessage(content=prompt)])
-    raw = resp.content.strip()
-    raw = re.sub(r"```(?:json)?|```", "", raw).strip()
-    return json.loads(raw)
+    from utils.llm_extraction import _parse_json_response
+    data = _parse_json_response(resp.content)
+    if data is None:
+        raise ValueError(f"LLM returned unparseable/empty response (length {len(resp.content)})")
+    return data
 
 
 async def _run_video_analysis(candidate_id: int):
