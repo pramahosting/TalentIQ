@@ -400,19 +400,38 @@ async def calculate_match(
     """Calculate ATS score and generate insights for a single job.
     Pass a pre-extracted `candidate_profile` (from extract_candidate_profile)
     when matching one resume against many jobs, to avoid re-extracting the
-    same resume on every call."""
+    same resume on every call.
+
+    Essential/good-to-have matching is judged by the LLM per-item (same fix
+    as CVAnalysis) rather than deterministic string/token matching, which
+    can't reliably judge long capability-statement requirements or
+    requirements phrased differently than the resume (e.g. "Data Modeling"
+    vs a resume that says "Dimensional Modeling"). This does mean one LLM
+    call per job (matching is inherently job-specific, unlike the
+    resume-intrinsic technical/business/soft skills below, which stay
+    cached in candidate_profile and are NOT re-extracted here)."""
     if candidate_profile is None:
         candidate_profile = await extract_candidate_profile(resume_text, groq_api_key, groq_model)
 
     requirements = await _extract_job_requirements(job, groq_api_key, groq_model)
-    text_lower = _normalize_text(resume_text)
-    candidate_skills = {_normalize_skill(s) for s in candidate_profile.get("hard_skills", [])}
+    essential = [s for s in requirements.get("essential", requirements.get("required_hard_skills", [])) if s]
+    good_to_have = [s for s in requirements.get("good_to_have", []) if s]
 
-    essential = [_normalize_skill(s) for s in requirements.get("essential", requirements.get("required_hard_skills", [])) if s]
-    good_to_have = [_normalize_skill(s) for s in requirements.get("good_to_have", []) if s]
-    matched = [s for s in essential if _skill_present(s, candidate_skills, text_lower)]
-    missed = [s for s in essential if s not in matched]
-    matched_good = [s for s in good_to_have if _skill_present(s, candidate_skills, text_lower)]
+    from utils.llm_extraction import extract_candidate_strengths
+    verdicts = await extract_candidate_strengths(
+        resume_text, {"essential": essential, "good_to_have": good_to_have}, groq_api_key, groq_model,
+    )
+    if "essential_matched" in verdicts or "essential_missing" in verdicts:
+        matched = verdicts.get("essential_matched", [])
+        missed = verdicts.get("essential_missing", [])
+        matched_good = verdicts.get("good_to_have_matched", [])
+    else:
+        # Fallback only if the LLM path didn't return verdicts for some reason
+        text_lower = _normalize_text(resume_text)
+        candidate_skills = {_normalize_skill(s) for s in candidate_profile.get("hard_skills", [])}
+        matched = [s for s in essential if _skill_present(_normalize_skill(s), candidate_skills, text_lower)]
+        missed = [s for s in essential if s not in matched]
+        matched_good = [s for s in good_to_have if _skill_present(_normalize_skill(s), candidate_skills, text_lower)]
 
     skills_pct = round(len(matched) / len(essential) * 100) if essential else 65
 
@@ -432,17 +451,19 @@ async def calculate_match(
 
     return {
         "ats_score": ats_score,
-        "strengths": [s.title() for s in matched][:8],
-        "improvements": [s.title() for s in missed][:5],
+        "strengths": matched[:8],
+        "improvements": missed[:5],
         "summary": summary,
         # ── Categorized strengths — same schema as CVAnalysis/CandidateLens ──
         "strengths_breakdown": {
-            "essential_matched": [s.title() for s in matched],
+            "essential_matched": matched,
             "technical_skills": candidate_profile.get("technical_skills", []),
             "business_skills": candidate_profile.get("business_skills", []),
             "soft_skills": candidate_profile.get("soft_skills", []),
             "significant_experience": candidate_profile.get("significant_experience", []),
             "certifications_degrees": candidate_profile.get("certifications_degrees", []),
+            "years_experience": candidate_profile.get("years_experience", 0),
+            "education": candidate_profile.get("education", ""),
         },
         # ── Categorized JD requirements ──
         "jd_requirements": {

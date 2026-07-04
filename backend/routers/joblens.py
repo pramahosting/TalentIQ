@@ -1005,6 +1005,8 @@ async def run_joblens(
                 "softSkills": strengths_breakdown.get("soft_skills", []),
                 "significantExperience": strengths_breakdown.get("significant_experience", []),
                 "certificationsDegrees": strengths_breakdown.get("certifications_degrees", []),
+                "yearsExperience": strengths_breakdown.get("years_experience", 0),
+                "education": strengths_breakdown.get("education", ""),
             },
         )
 

@@ -129,7 +129,7 @@ def _parse_jd_json(raw: str) -> Optional[dict]:
     }
 
 
-def _call_groq(prompt: str, groq_key: str) -> str:
+def _call_groq(prompt: str, groq_key: str, groq_model: str = DEFAULT_GROQ_MODEL) -> str:
     from langchain_groq import ChatGroq
     from langchain.schema import HumanMessage
 
@@ -168,7 +168,7 @@ async def _generate_jd_content(
 
     if groq_key:
         try:
-            raw = _call_groq(prompt, groq_key)
+            raw = _call_groq(prompt, groq_key, groq_model)
             parsed = _parse_jd_json(raw)
             if parsed:
                 parsed["ai_powered"] = True
