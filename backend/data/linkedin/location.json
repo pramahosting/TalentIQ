@@ -1,0 +1,165 @@
+{
+  "India": {
+    "country_geoUrn": "102713980",
+    "cities": {
+      "Mumbai": "106164952",
+      "Delhi": "106187582",
+      "Bangalore": "105214831",
+      "Chennai": "106888327",
+      "Hyderabad": "105556991",
+      "Pune": "106820004",
+      "Kolkata": "102626643",
+      "Ahmedabad": "105531041",
+      "Gurgaon": "104903763",
+      "Noida": "104869687",
+      "Faridabad": "103939593",
+      "Jaipur": "106199252",
+      "Chandigarh": "103736294",
+      "Indore": "105520627",
+      "Bhopal": "105419121",
+      "Nagpur": "106118126",
+      "Coimbatore": "106409219",
+      "Trivandrum": "105991100",
+      "Kochi": "105352273",
+      "Thrissur": "106604133",
+      "Madurai": "105864819",
+      "Salem": "106742756",
+      "Trichy": "105750191",
+      "Vellore": "105774124",
+      "Tiruppur": "105775835",
+      "Erode": "105902801",
+      "Karur": "106151115"
+    }
+  },
+
+  "Australia": {
+    "country_geoUrn": "101452733",
+    "cities": {
+      "Sydney": "104769905",
+      "Melbourne": "101933560",
+      "Brisbane": "104047120",
+      "Perth": "101452733",
+      "Adelaide": "104445569",
+      "Canberra": "102197863",
+      "Hobart": "101687087",
+      "Darwin": "102470261",
+      "Gold Coast": "104358886",
+      "Newcastle": "104831504",
+      "Wollongong": "104764464",
+      "Geelong": "104523836",
+      "Ballarat": "103979506",
+      "Bendigo": "103956983",
+      "Townsville": "104459661",
+      "Cairns": "104548185",
+      "Toowoomba": "104451925"
+    }
+  },
+
+  "USA": {
+    "country_geoUrn": "103644278",
+    "cities": {
+      "New York": "102571732",
+      "San Francisco": "102277331",
+      "Los Angeles": "102448103",
+      "San Diego": "102095887",
+      "San Jose": "102196087",
+      "Seattle": "104116203",
+      "Austin": "104478775",
+      "Dallas": "104234530",
+      "Houston": "102764951",
+      "Chicago": "101636687",
+      "Boston": "102380872",
+      "Atlanta": "104030099",
+      "Miami": "101452733",
+      "Orlando": "104472398",
+      "Tampa": "104166975",
+      "Phoenix": "102289193",
+      "Denver": "104116203",
+      "Boulder": "102574221",
+      "San Mateo": "105694082",
+      "Palo Alto": "102256910",
+      "Mountain View": "102209275",
+      "Cupertino": "104527472"
+    }
+  },
+
+  "United Kingdom": {
+    "country_geoUrn": "101165590",
+    "cities": {
+      "London": "102890719",
+      "Manchester": "100971383",
+      "Birmingham": "101166354",
+      "Leeds": "102685828",
+      "Liverpool": "103181491",
+      "Sheffield": "103297282",
+      "Nottingham": "103375131",
+      "Leicester": "102864373",
+      "Coventry": "103136445",
+      "Derby": "103491353",
+      "Bristol": "100883080",
+      "Bath": "104127202",
+      "Reading": "102777683",
+      "Slough": "103213952",
+      "Milton Keynes": "101228625",
+      "Oxford": "100523781",
+      "Cambridge": "100811329",
+      "Edinburgh": "102346447",
+      "Glasgow": "100887129",
+      "Aberdeen": "103033151",
+      "Dundee": "103039258"
+    }
+  },
+
+  "Canada": {
+    "country_geoUrn": "101174742",
+    "cities": {
+      "Toronto": "101174742",
+      "Mississauga": "103604641",
+      "Brampton": "104848377",
+      "Markham": "104170880",
+      "Vaughan": "104842564",
+      "Richmond Hill": "103409768",
+      "Scarborough": "104606810",
+      "North York": "104588474",
+      "Etobicoke": "104327008",
+      "Vancouver": "101882809",
+      "Burnaby": "102831121",
+      "Richmond": "104485551",
+      "Surrey": "101940221",
+      "Coquitlam": "103447645",
+      "Montreal": "101883951",
+      "Laval": "104030095",
+      "Longueuil": "104031075",
+      "Brossard": "104198035",
+      "Calgary": "101193050",
+      "Edmonton": "102563231",
+      "Ottawa": "101184338",
+      "Gatineau": "104375947",
+      "Waterloo": "102622331",
+      "Kitchener": "104091801"
+    }
+  },
+
+  "New Zealand": {
+    "country_geoUrn": "105490917",
+    "cities": {
+      "Auckland": "102327126",
+      "Manukau": "104817845",
+      "North Shore": "103371873",
+      "Waitakere": "103813743",
+      "Papakura": "103674965",
+      "Wellington": "104508036",
+      "Lower Hutt": "102786373",
+      "Upper Hutt": "104776677",
+      "Christchurch": "102812983",
+      "Hamilton": "104071543",
+      "Tauranga": "103258107",
+      "Rotorua": "104506171",
+      "Napier": "103638963",
+      "Hastings": "103300214",
+      "Palmerston North": "104005776",
+      "Dunedin": "103405521",
+      "Invercargill": "102434597"
+    }
+  }
+}
