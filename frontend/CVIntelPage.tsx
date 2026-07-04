@@ -603,10 +603,10 @@ export default function CVAnalysisPage() {
               </div>
               {result.strengthsBreakdown ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                  {(result.candidateProfile?.yearsExperience > 0 || result.candidateProfile?.education) && (
+                  {((result.candidateProfile?.yearsExperience ?? 0) > 0 || result.candidateProfile?.education) && (
                     <div style={{ display: "flex", gap: 16, fontSize: 12, color: "var(--text-secondary)", paddingBottom: 8, borderBottom: "1px solid var(--border)" }}>
-                      {result.candidateProfile?.yearsExperience > 0 && (
-                        <span><strong>Experience:</strong> {result.candidateProfile.yearsExperience}+ years</span>
+                      {(result.candidateProfile?.yearsExperience ?? 0) > 0 && (
+                        <span><strong>Experience:</strong> {result.candidateProfile?.yearsExperience}+ years</span>
                       )}
                       {result.candidateProfile?.education && (
                         <span><strong>Education:</strong> {result.candidateProfile.education}</span>
