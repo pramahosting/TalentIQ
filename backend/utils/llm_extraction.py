@@ -462,7 +462,7 @@ Return ONLY valid JSON, no markdown, no commentary:
         last_error = None
         for _attempt in range(4):
             try:
-                llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low")
+                llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
                 _t0 = time.time()
                 resp = llm.invoke([HumanMessage(content=_build_prompt(jd_limit))])
                 _elapsed = time.time() - _t0
@@ -603,7 +603,7 @@ async def extract_candidate_strengths(
             last_error = None
             for _attempt in range(4):
                 try:
-                    llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0, max_tokens=2000, reasoning_format="hidden", reasoning_effort="low")
+                    llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0, max_tokens=2000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
                     _t0 = time.time()
                     resp = llm.invoke([HumanMessage(content=build_prompt(limit))])
                     _elapsed = time.time() - _t0
@@ -771,7 +771,7 @@ async def extract_candidate_strengths_general(
             from langchain_groq import ChatGroq
             from langchain.schema import HumanMessage
 
-            llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low")
+            llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
             prompt = f"""You are an expert recruiter. Read the resume below and produce an
 evidence-based categorized breakdown. Only credit something the resume
 actually supports — do not invent skills or experience it doesn't contain.
