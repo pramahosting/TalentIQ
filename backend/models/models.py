@@ -56,7 +56,7 @@ class UserAPIKey(Base):
     __tablename__ = "tiq_user_api_keys"
 
     id         = Column(Integer, primary_key=True, index=True)
-    user_id    = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
+    user_id    = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=False)
     service    = Column(String(100), nullable=False)
     key_name   = Column(String(100), nullable=False)
     key_value  = Column(Text, nullable=False)
@@ -102,7 +102,7 @@ class Resume(Base):
     __tablename__ = "tiq_resumes"
 
     id               = Column(Integer, primary_key=True, index=True)
-    user_id          = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
+    user_id          = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=False)
     filename         = Column(String(255))
     raw_text         = Column(Text)
     applicant_name   = Column(String(200))
@@ -121,7 +121,7 @@ class JobSearch(Base):
 
     id            = Column(Integer, primary_key=True, index=True)
     sequence_number = Column(Integer)  # per-user sequential display number (1, 2, 3...)
-    user_id       = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
+    user_id       = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=False)
     role          = Column(String(200))
     location      = Column(String(200))
     industry      = Column(String(200))
@@ -139,7 +139,7 @@ class Job(Base):
     __tablename__ = "tiq_jobs"
 
     id             = Column(Integer, primary_key=True, index=True)
-    search_id      = Column(Integer, ForeignKey("tiq_job_searches.id"), nullable=False)
+    search_id      = Column(Integer, ForeignKey("tiq_job_searches.id"), index=True, nullable=False)
     title          = Column(String(300))
     company        = Column(String(300))
     location       = Column(String(300))
@@ -162,9 +162,9 @@ class JobMatch(Base):
     __tablename__ = "tiq_job_matches"
 
     id           = Column(Integer, primary_key=True, index=True)
-    user_id      = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
-    resume_id    = Column(Integer, ForeignKey("tiq_resumes.id"), nullable=False)
-    job_id       = Column(Integer, ForeignKey("tiq_jobs.id"), nullable=False)
+    user_id      = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=False)
+    resume_id    = Column(Integer, ForeignKey("tiq_resumes.id"), index=True, nullable=False)
+    job_id       = Column(Integer, ForeignKey("tiq_jobs.id"), index=True, nullable=False)
     ats_score    = Column(Float, default=0)
     strengths    = Column(JSON)
     improvements = Column(JSON)
@@ -188,7 +188,7 @@ class JobIntelRun(Base):
 
     id                   = Column(Integer, primary_key=True, index=True)
     sequence_number = Column(Integer)  # per-user sequential display number (1, 2, 3...)
-    user_id              = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
+    user_id              = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=False)
     role                 = Column(String(200))
     location             = Column(String(200))
     industry             = Column(String(200))
@@ -211,7 +211,7 @@ class JobIntelRecord(Base):
     __tablename__ = "tiq_jobintel_records"
 
     id                 = Column(Integer, primary_key=True, index=True)
-    run_id             = Column(Integer, ForeignKey("tiq_jobintel_runs.id"), nullable=False)
+    run_id             = Column(Integer, ForeignKey("tiq_jobintel_runs.id"), index=True, nullable=False)
     title              = Column(String(300))
     job_group          = Column(String(200))
     company            = Column(String(300))
@@ -248,7 +248,7 @@ class LinkLensSearch(Base):
 
     id             = Column(Integer, primary_key=True, index=True)
     sequence_number = Column(Integer)  # per-user sequential display number (1, 2, 3...)
-    user_id        = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
+    user_id        = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=False)
     job_title      = Column(String(300))
     country        = Column(String(200))
     city           = Column(String(200))
@@ -267,7 +267,7 @@ class LinkedInProfile(Base):
     __tablename__ = "tiq_linkedin_profiles"
 
     id              = Column(Integer, primary_key=True, index=True)
-    search_id       = Column(Integer, ForeignKey("tiq_linklens_searches.id"), nullable=False)
+    search_id       = Column(Integer, ForeignKey("tiq_linklens_searches.id"), index=True, nullable=False)
     profile_url     = Column(Text)
     full_name       = Column(String(300))
     headline        = Column(Text)
@@ -296,7 +296,7 @@ class AuditLog(Base):
     __tablename__ = "tiq_audit_logs"
 
     id         = Column(Integer, primary_key=True, index=True)
-    user_id    = Column(Integer, ForeignKey("tiq_users.id"), nullable=True)
+    user_id    = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=True)
     action     = Column(String(200), nullable=False)
     resource   = Column(String(200))
     detail     = Column(JSON)
@@ -315,13 +315,13 @@ class JobLensSession(Base):
 
     id             = Column(Integer, primary_key=True, index=True)
     sequence_number = Column(Integer)  # per-user sequential display number (1, 2, 3...)
-    user_id        = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
+    user_id        = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=False)
     jd_text        = Column(Text)
     jd_skills      = Column(JSON, default=list)
     jd_role        = Column(String(300))     # extracted by LLM/heuristic — not guessed client-side
     jd_location    = Column(String(300))
     jd_company     = Column(String(300))
-    jd_record_id   = Column(Integer, ForeignKey("tiq_jd_records.id"), nullable=True)  # optional link to JD Management
+    jd_record_id   = Column(Integer, ForeignKey("tiq_jd_records.id"), index=True, nullable=True)  # optional link to JD Management
     jd_client_name = Column(String(300))     # denormalized client name, for display without extra joins
     jd_essential_skills   = Column(JSON, default=list)
     jd_good_to_have_skills = Column(JSON, default=list)
@@ -340,7 +340,7 @@ class JobLensCandidate(Base):
     __tablename__ = "tiq_joblens_candidates"
 
     id                  = Column(Integer, primary_key=True, index=True)
-    session_id          = Column(Integer, ForeignKey("tiq_joblens_sessions.id"), nullable=False)
+    session_id          = Column(Integer, ForeignKey("tiq_joblens_sessions.id"), index=True, nullable=False)
     name                = Column(String(200))
     email               = Column(String(200))
     phone               = Column(String(100))
@@ -375,9 +375,9 @@ class JobLensCandidate(Base):
     # covered by the same row-level access control as everything else.
     # If this candidate was sourced from Vendor Management (rather than a
     # raw manual CV upload), these point back to that origin.
-    source_vendor_id   = Column(Integer, ForeignKey("tiq_vendors.id"), nullable=True)
+    source_vendor_id   = Column(Integer, ForeignKey("tiq_vendors.id"), index=True, nullable=True)
     source_vendor_name = Column(String(300))  # denormalized, for display without extra joins
-    source_tracked_candidate_id = Column(Integer, ForeignKey("tiq_tracked_candidates.id"), nullable=True)
+    source_tracked_candidate_id = Column(Integer, ForeignKey("tiq_tracked_candidates.id"), index=True, nullable=True)
 
     resume_file_blob     = Column(LargeBinary)
     resume_file_mimetype = Column(String(100))
@@ -403,7 +403,7 @@ class JDDocument(Base):
 
     id                  = Column(Integer, primary_key=True, index=True)
     sequence_number = Column(Integer)  # per-user sequential display number (1, 2, 3...)
-    user_id             = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
+    user_id             = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=False)
     role_title          = Column(String(300), nullable=False)
     company_name        = Column(String(300))
     job_type            = Column(String(50))    # Full time / Fix term / Contract
@@ -434,7 +434,7 @@ class CVAnalysisRecord(Base):
 
     id                = Column(Integer, primary_key=True, index=True)
     sequence_number = Column(Integer)  # per-user sequential display number (1, 2, 3...)
-    user_id           = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
+    user_id           = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=False)
     source_name       = Column(String(300))         # resume filename, or "Resume"
     overall_score     = Column(Float, default=0.0)
     result            = Column(JSON, default=dict)   # full AnalysisResult payload
@@ -467,10 +467,10 @@ class JDRecord(Base):
     __tablename__ = "tiq_jd_records"
 
     id              = Column(Integer, primary_key=True, index=True)
-    user_id         = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
+    user_id         = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=False)
     sequence_number = Column(Integer)             # per-user sequential display number (1, 2, 3...)
     title           = Column(String(300), nullable=False)
-    client_id       = Column(Integer, ForeignKey("tiq_clients.id"), nullable=True)  # sole link to the client — no redundant free-text copy (3NF)
+    client_id       = Column(Integer, ForeignKey("tiq_clients.id"), index=True, nullable=True)  # sole link to the client — no redundant free-text copy (3NF)
     status          = Column(String(30), default="Open")
     description     = Column(Text)
     # Categorized requirements — extracted once (LLM or heuristic) when the
@@ -504,7 +504,7 @@ class Vendor(Base):
     __tablename__ = "tiq_vendors"
 
     id               = Column(Integer, primary_key=True, index=True)
-    user_id          = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
+    user_id          = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=False)
     sequence_number  = Column(Integer)   # per-user sequential display number
     name             = Column(String(300), nullable=False)
     address          = Column(String(300))
@@ -524,7 +524,7 @@ class Client(Base):
     __tablename__ = "tiq_clients"
 
     id                = Column(Integer, primary_key=True, index=True)
-    user_id           = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
+    user_id           = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=False)
     name              = Column(String(300), nullable=False)
     address           = Column(String(300))
     abn               = Column(String(50))
@@ -540,9 +540,9 @@ class TrackedCandidate(Base):
     __tablename__ = "tiq_tracked_candidates"
 
     id               = Column(Integer, primary_key=True, index=True)
-    user_id          = Column(Integer, ForeignKey("tiq_users.id"), nullable=False)
-    jd_id            = Column(Integer, ForeignKey("tiq_jd_records.id"), nullable=False)
-    vendor_id        = Column(Integer, ForeignKey("tiq_vendors.id"), nullable=False)
+    user_id          = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=False)
+    jd_id            = Column(Integer, ForeignKey("tiq_jd_records.id"), index=True, nullable=False)
+    vendor_id        = Column(Integer, ForeignKey("tiq_vendors.id"), index=True, nullable=False)
     name             = Column(String(200), nullable=False)
     email            = Column(String(200))
     phone            = Column(String(50))
@@ -558,7 +558,7 @@ class TrackedCandidate(Base):
     # submission from any vendor gets flagged, but is kept as its own row
     # (not merged/discarded) so vendor attribution is fully auditable.
     is_duplicate    = Column(Boolean, default=False)
-    duplicate_of_id = Column(Integer, ForeignKey("tiq_tracked_candidates.id"), nullable=True)
+    duplicate_of_id = Column(Integer, ForeignKey("tiq_tracked_candidates.id"), index=True, nullable=True)
 
     submitted_at = Column(DateTime, default=datetime.utcnow)
     created_at   = Column(DateTime, default=datetime.utcnow)
@@ -577,7 +577,7 @@ class CandidateStatusLog(Base):
     __tablename__ = "tiq_candidate_status_log"
 
     id           = Column(Integer, primary_key=True, index=True)
-    candidate_id = Column(Integer, ForeignKey("tiq_tracked_candidates.id"), nullable=False)
+    candidate_id = Column(Integer, ForeignKey("tiq_tracked_candidates.id"), index=True, nullable=False)
     old_status   = Column(String(30))
     new_status   = Column(String(30))
     changed_at   = Column(DateTime, default=datetime.utcnow)
