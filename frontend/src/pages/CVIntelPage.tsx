@@ -7,6 +7,7 @@ import {
   User, MapPin, Briefcase, List,
 } from "lucide-react";
 import { api, cvintelApi } from "../lib/api";
+import { useAuth } from "../hooks/useAuth";
 import { useLatestMutation } from "../hooks/useLatestMutation";
 
 interface AnalysisResult {
@@ -198,6 +199,8 @@ function parseJDInfo(text: string, filename: string) {
 
 // ── Main page ────────────────────────────────────────────────────────────────
 export default function CVAnalysisPage() {
+    const { user } = useAuth();
+    const isAdmin = user?.role === "admin";
     const [resumeText, setResumeText] = useState("");
   const [resumeFile, setResumeFile] = useState<File | null>(null);
   const [extractedResumeText, setExtractedResumeText] = useState("");
@@ -446,7 +449,7 @@ export default function CVAnalysisPage() {
       {/* ── Results ── */}
       {result && (
         <div>
-          {result.aiPowered ? (
+          {isAdmin && (result.aiPowered ? (
             <div className="tiq-alert tiq-alert-success tiq-mb-4" style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <Sparkles size={14} /> AI-powered analysis by Groq LLM{result.groqModel ? ` (${result.groqModel})` : ""}
             </div>
@@ -460,8 +463,8 @@ export default function CVAnalysisPage() {
                 you're relying on it as a fallback.
               </span>
             </div>
-          )}
-          {result.note && (
+          ))}
+          {isAdmin && result.note && (
             <div style={{ marginBottom: 16, padding: "10px 14px", background: "rgba(139,92,246,.08)",
               border: "1px solid rgba(139,92,246,.2)", borderRadius: 8, fontSize: 13, color: "var(--violet-500)" }}>
               💡 {result.note}

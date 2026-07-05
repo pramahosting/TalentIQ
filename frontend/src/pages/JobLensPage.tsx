@@ -7,6 +7,7 @@ import {
   CheckCircle, Clock, XCircle, Star, Video, RefreshCw, Sparkles, BarChart2,
   Trash2, Mail, Building2, AlertTriangle } from "lucide-react";
 import { api } from "../lib/api";
+import { useAuth } from "../hooks/useAuth";
 import JDManagementTab from "../components/candidatetrack/JDManagementTab";
 import VendorManagementTab from "../components/candidatetrack/VendorManagementTab";
 import CandidateTrackingTab from "../components/candidatetrack/CandidateTrackingTab";
@@ -1018,6 +1019,8 @@ function CandidateRow({
 
 // ─── MAIN PAGE ─────────────────────────────────────────────────────────────
 export default function JobLensPage() {
+    const { user } = useAuth();
+    const isAdmin = user?.role === "admin";
     const qc = useQueryClient();
   const [jdText, setJdText] = useState("");
   const [pasteTextOpen, setPasteTextOpen] = useState(false);
@@ -1425,7 +1428,7 @@ export default function JobLensPage() {
                 ))}
               </div>
 
-              {activeSession.ai_powered && (
+              {isAdmin && activeSession.ai_powered && (
                 <div className="tiq-alert tiq-alert-success tiq-mb-4" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <Sparkles size={14} /> AI-powered scoring by Groq LLM
                 </div>
