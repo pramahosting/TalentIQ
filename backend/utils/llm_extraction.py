@@ -33,7 +33,39 @@ comprehensive the more the system is used.
 import json
 import re
 import requests
+import asyncio
+import concurrent.futures
 from typing import List, Optional
+
+# asyncio.to_thread() uses Python's DEFAULT executor, sized at
+# min(32, cpu_count + 4) — on a modest 1-2 vCPU cloud instance, that's
+# only 5-6 worker threads for the ENTIRE application, not just LLM calls.
+# Since every Groq/Ollama call in this module went through asyncio.to_
+# thread, that default sizing became an invisible concurrency ceiling far
+# below what the app could otherwise handle: only 5-6 requests could ever
+# have an LLM call in flight at once, everything else silently queued
+# behind them, regardless of how many concurrent users hit the app or how
+# much headroom Groq's own rate limits actually had.
+#
+# These calls are I/O-bound (waiting on network response), not CPU-bound —
+# a thread sits mostly idle waiting for Groq/Ollama to respond, so having
+# far more threads than CPU cores is safe and correct here, unlike CPU-
+# bound work where more threads than cores just adds contention. A
+# dedicated pool sized for expected concurrent request volume avoids
+# competing with (or being limited by) whatever else might use the
+# default executor elsewhere in the app.
+_LLM_THREAD_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=40, thread_name_prefix="llm-call",
+)
+
+
+async def _run_in_llm_pool(fn, *args):
+    """Runs a blocking function in the dedicated LLM thread pool instead of
+    asyncio's default (CPU-count-sized) executor — see _LLM_THREAD_POOL
+    above for why this matters."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_LLM_THREAD_POOL, fn, *args)
+
 
 # ── Document length budget for LLM prompts ──────────────────────────────
 # Rough estimate: ~4 characters per token for English text. Even Groq's
@@ -443,8 +475,7 @@ Return ONLY valid JSON, no markdown, no commentary:
     if groq_key:
         attempts["groq"] = _try_groq
     if attempts:
-        import asyncio
-        outcome = await asyncio.to_thread(race_llm_providers, attempts)
+        outcome = await _run_in_llm_pool(race_llm_providers, attempts)
         if outcome:
             _, result = outcome
             return result
@@ -657,8 +688,7 @@ booleans in order:
     if groq_key:
         attempts["groq"] = _try_groq
     if attempts:
-        import asyncio
-        outcome = await asyncio.to_thread(race_llm_providers, attempts)
+        outcome = await _run_in_llm_pool(race_llm_providers, attempts)
         if outcome:
             _, result = outcome
             return result
