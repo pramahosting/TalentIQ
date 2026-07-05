@@ -151,6 +151,42 @@ MIGRATIONS = [
     # Add any missing columns
     "ALTER TABLE tiq_linklens_searches ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP",
     "ALTER TABLE tiq_jobintel_runs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP",
+
+    # Missing indexes on foreign key columns — SQLAlchemy's ForeignKey()
+    # only creates the constraint, never an index, so every dashboard
+    # query filtering/joining on these columns was doing a full sequential
+    # scan. Harmless with a handful of test rows; gets progressively
+    # slower as real data accumulates, which is exactly the "dashboard is
+    # slow now" symptom this fixes. CREATE INDEX IF NOT EXISTS is safe to
+    # run repeatedly and doesn't lock the table for reads.
+    "CREATE INDEX IF NOT EXISTS idx_tiq_user_api_keys_user_id ON tiq_user_api_keys(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_resumes_user_id ON tiq_resumes(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_job_searches_user_id ON tiq_job_searches(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_jobs_search_id ON tiq_jobs(search_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_job_matches_user_id ON tiq_job_matches(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_job_matches_resume_id ON tiq_job_matches(resume_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_job_matches_job_id ON tiq_job_matches(job_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_jobintel_runs_user_id ON tiq_jobintel_runs(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_jobintel_records_run_id ON tiq_jobintel_records(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_linklens_searches_user_id ON tiq_linklens_searches(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_linkedin_profiles_search_id ON tiq_linkedin_profiles(search_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_audit_logs_user_id ON tiq_audit_logs(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_joblens_sessions_user_id ON tiq_joblens_sessions(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_joblens_sessions_jd_record_id ON tiq_joblens_sessions(jd_record_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_joblens_candidates_session_id ON tiq_joblens_candidates(session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_joblens_candidates_source_vendor_id ON tiq_joblens_candidates(source_vendor_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_joblens_candidates_source_tracked_candidate_id ON tiq_joblens_candidates(source_tracked_candidate_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_jd_documents_user_id ON tiq_jd_documents(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_cvanalysis_records_user_id ON tiq_cvanalysis_records(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_jd_records_user_id ON tiq_jd_records(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_jd_records_client_id ON tiq_jd_records(client_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_vendors_user_id ON tiq_vendors(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_clients_user_id ON tiq_clients(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_tracked_candidates_user_id ON tiq_tracked_candidates(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_tracked_candidates_jd_id ON tiq_tracked_candidates(jd_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_tracked_candidates_vendor_id ON tiq_tracked_candidates(vendor_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_tracked_candidates_duplicate_of_id ON tiq_tracked_candidates(duplicate_of_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_candidate_status_log_candidate_id ON tiq_candidate_status_log(candidate_id)",
 ]
 
 async def run():
