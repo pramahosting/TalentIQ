@@ -551,8 +551,6 @@ async def analyze_resume(
         final_resume, final_jd, groq_key, groq_model,
         ollama_base_url=ollama_base_url, ollama_model=ollama_model, db=db,
     )
-    if not groq_key and not ollama_base_url:
-        result["note"] = "Add a Groq API key or a local Ollama instance in Settings for AI-powered requirement extraction and feedback"
 
     return result
 
