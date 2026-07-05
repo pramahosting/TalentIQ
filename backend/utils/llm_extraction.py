@@ -542,33 +542,33 @@ async def extract_candidate_strengths(
      "years_experience": int, "education": str, "ai_powered": bool}
 
     Each essential/good_to_have requirement is evaluated INDIVIDUALLY by the
-    LLM (matched: true/false per item, not a free-text summary) — this is
-    the actual scoring signal used downstream. Requirements are often long,
-    abstract capability statements ("Strong ability to translate business
-    needs into data architecture...") or use different terminology than the
-    resume (e.g. JD says "Data Modeling", resume says "Dimensional
-    Modeling" — a specific technique that IS a form of it). Neither a
-    literal substring match nor a "does every word appear somewhere" check
-    can reliably judge either case — that needs actual reading
-    comprehension.
+    LLM (matched: true/false per item, not a free-text summary) for
+    genuine reading comprehension — a requirement like "Data Modeling"
+    should match a resume saying "Dimensional Modeling" (a specific
+    technique that IS a form of it), and a literal substring/keyword check
+    can't judge that reliably.
 
-    The verdicts come back as a compact boolean array (one true/false per
-    requirement, in order) rather than a numbered object per item
-    ({"n": 1, "matched": true}) — functionally identical accuracy, but a
-    fraction of the output tokens. That matters a lot in practice: with a
-    reasoning-capable model, a longer/more complex required output format
-    is more likely to exhaust the model's response budget on reasoning
-    before it finishes writing the JSON, which silently drops this whole
-    call down to the much weaker keyword-only fallback — at that point
-    "more accurate in theory" loses to "actually completes successfully"
-    most of the time.
+    IMPORTANT — why this is chunked rather than one big request: asking a
+    reasoning model to judge up to 25 items against a full resume in a
+    SINGLE call measurably took 50+ seconds in production (confirmed via
+    direct timing — the exact same model handling a simpler single-pass
+    JD-categorization task took under 5 seconds). Lowering reasoning
+    effort/format settings didn't fix this, because the issue isn't how
+    much the model deliberates per item, it's that judging 25 separate
+    things against a full document is genuinely 25x the work of judging
+    one — no config flag changes that. So essential requirements are split
+    into small chunks (max 8 items) and evaluated CONCURRENTLY, each chunk
+    a separate lightweight request; good-to-have verdicts and the
+    resume-level skills/summary extraction run as their own concurrent
+    call alongside those chunks. Total wall-clock time is bounded by the
+    SLOWEST single chunk, not the sum of all judgments — the actual fix
+    for "one big call is slow," rather than hoping a smaller model or a
+    reasoning-effort setting papers over an inherently large task.
 
-    Races Ollama and Groq concurrently when both are configured — total
-    latency is bounded by whichever responds first (see
-    race_llm_providers), not the sum of a slow/failed attempt plus the
-    other. Falls to the deterministic heuristic only if every configured
-    provider fails. known_terms_hint (from the accumulated skill taxonomy)
-    nudges the categorization toward terminology already seen before.
+    Races Ollama and Groq concurrently PER CHUNK when both are configured.
+    Falls to the deterministic heuristic only if the whole thing fails.
+    known_terms_hint (from the accumulated skill taxonomy) nudges
+    categorization toward terminology already seen before.
     """
     essential = [s for s in jd_requirements.get("essential", []) if s][:15]
     good_to_have = [s for s in jd_requirements.get("good_to_have", []) if s][:10]
@@ -576,8 +576,6 @@ async def extract_candidate_strengths(
     if not essential and not good_to_have:
         return _fallback_candidate_strengths(resume_text, jd_requirements)
 
-    essential_block = "\n".join(f"{i+1}. {r}" for i, r in enumerate(essential)) or "(none)"
-    good_block = "\n".join(f"{i+1}. {r}" for i, r in enumerate(good_to_have)) or "(none)"
     hint_block = ""
     if known_terms_hint:
         hint_block = (
@@ -588,39 +586,110 @@ async def extract_candidate_strengths(
             + ", ".join(known_terms_hint[:30])
         )
 
-    def _build_prompt(resume_limit: int) -> str:
-        return f"""You are an expert recruiter evaluating a candidate's resume against a
-specific job's requirements. For EACH numbered requirement below, judge
+    async def _race_for(build_prompt, parse_result):
+        """Races Ollama vs Groq (whichever configured) for a single prompt/
+        parse pair, with Groq's 413-retry sequence built in. Returns the
+        parsed result dict, or None if every configured provider failed."""
+        def _try_ollama() -> Optional[dict]:
+            ollama_mdl = ollama_model or "llama3"
+            raw = _call_ollama(build_prompt(OLLAMA_DOC_CHARS), ollama_base_url, ollama_mdl)
+            return parse_result(_parse_json_response(raw))
+
+        def _try_groq() -> Optional[dict]:
+            from langchain_groq import ChatGroq
+            from langchain.schema import HumanMessage
+
+            limit = MAX_DOC_CHARS
+            last_error = None
+            for _attempt in range(4):
+                try:
+                    llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0, max_tokens=2000, reasoning_format="hidden", reasoning_effort="low")
+                    _t0 = time.time()
+                    resp = llm.invoke([HumanMessage(content=build_prompt(limit))])
+                    _elapsed = time.time() - _t0
+                    print(f"  TIMING: extract_candidate_strengths chunk Groq call ({groq_model}) took {_elapsed:.2f}s, prompt size {limit} chars")
+                    return parse_result(_parse_json_response(resp.content))
+                except Exception as e:
+                    last_error = e
+                    if _is_token_limit_error(e):
+                        new_limit = _safe_retry_chars(e, limit)
+                        if new_limit:
+                            limit = new_limit
+                            continue
+                    raise
+            if last_error:
+                raise last_error
+            return None
+
+        attempts = {}
+        if ollama_base_url:
+            attempts["ollama"] = _try_ollama
+        if groq_key:
+            attempts["groq"] = _try_groq
+        if not attempts:
+            return None
+        outcome = await _run_in_llm_pool(race_llm_providers, attempts)
+        return outcome[1] if outcome else None
+
+    async def _verdict_chunk(items: list) -> Optional[list]:
+        """Returns a list of booleans (one per item, in order), or None on
+        total failure for this chunk."""
+        if not items:
+            return []
+        block = "\n".join(f"{i+1}. {r}" for i, r in enumerate(items))
+
+        def _build(resume_limit: int) -> str:
+            return f"""You are an expert recruiter. For EACH numbered requirement below, judge
 whether the resume provides genuine evidence for it — reading for meaning
-and equivalent experience, not exact wording. Some requirements are
-phrased as skills ("Data Modeling"), others as broad capability statements
-("Strong ability to translate business needs into data architecture") —
-judge both the same way: does the resume's actual content support this,
-even if described using different terms, a more specific technique, or
-different phrasing? For example, a resume mentioning "Dimensional
-Modeling", "Data Vault", or "Star Schema design" DOES satisfy a
-requirement for "Data Modeling", since those are specific forms of it.
-Only mark something matched if the resume genuinely supports it — do not
-be generous with unrelated content.
+and equivalent experience, not exact wording. A requirement may be a
+specific skill ("Data Modeling") or a broad capability statement — judge
+both the same way: does the resume's actual content support this, even if
+described using different terms or a more specific technique? For
+example, a resume mentioning "Dimensional Modeling", "Data Vault", or
+"Star Schema design" DOES satisfy a requirement for "Data Modeling".
 {hint_block}
 
-ESSENTIAL REQUIREMENTS:
-{essential_block}
-
-GOOD-TO-HAVE REQUIREMENTS:
-{good_block}
+REQUIREMENTS:
+{block}
 
 RESUME:
 \"\"\"{_truncate_for_llm(resume_text, "resume text", resume_limit)}\"\"\"
 
-Return ONLY valid JSON, no markdown, no commentary. "essential_matched" must
-be a flat array of exactly {len(essential)} booleans, one per essential
-requirement above IN THE SAME ORDER (true if genuinely matched, false if
-not) — not an object, not a list of names, just booleans in order.
-Likewise "good_to_have_matched" must have exactly {len(good_to_have)}
-booleans in order:
+Return ONLY valid JSON, no markdown, no commentary — a flat array of
+exactly {len(items)} booleans, one per requirement above, IN THE SAME ORDER:
+{{"matched": [true, false, true]}}"""
+
+        def _parse(data: dict) -> Optional[list]:
+            if not data or data.get("matched") is None:
+                return None
+            v = data.get("matched") or []
+            return [bool(v[i]) if i < len(v) else False for i in range(len(items))]
+
+        return await _race_for(_build, _parse)
+
+    async def _good_to_have_and_skills() -> Optional[dict]:
+        """One lighter call: good-to-have verdicts (fewer, usually simpler
+        items) plus the resume-level skills/experience/education
+        extraction that doesn't need per-item judgment."""
+        good_block = "\n".join(f"{i+1}. {r}" for i, r in enumerate(good_to_have)) or "(none)"
+
+        def _build(resume_limit: int) -> str:
+            gth_instructions = (
+                f'"good_to_have_matched" must be a flat array of exactly {len(good_to_have)} '
+                f"booleans, one per good-to-have requirement below, in the same order:\n\n"
+                f"GOOD-TO-HAVE REQUIREMENTS:\n{good_block}\n\n"
+                if good_to_have else ""
+            )
+            return f"""You are an expert recruiter reading a resume. {gth_instructions}
+Also extract the following from the resume itself (not tied to any
+specific requirement):
+{hint_block}
+
+RESUME:
+\"\"\"{_truncate_for_llm(resume_text, "resume text", resume_limit)}\"\"\"
+
+Return ONLY valid JSON, no markdown, no commentary:
 {{
-  "essential_matched": [true, false, true],
   "good_to_have_matched": [true, false],
   "technical_skills": ["<candidate's technical/hard skills relevant to this role — tools, languages, platforms>"],
   "business_skills": ["<business/domain skills — stakeholder management, budgeting, domain expertise, strategy>"],
@@ -632,93 +701,60 @@ booleans in order:
   "education": "<highest qualification found, or empty string>"
 }}"""
 
-    def _build_result(data: dict) -> Optional[dict]:
-        if not data or (data.get("essential_matched") is None and not data.get("technical_skills")):
-            return None
-        ev = data.get("essential_matched") or []
-        gv = data.get("good_to_have_matched") or []
-        essential_matched = [r for i, r in enumerate(essential) if i < len(ev) and ev[i]]
-        essential_missing = [r for i, r in enumerate(essential) if not (i < len(ev) and ev[i])]
-        good_matched = [r for i, r in enumerate(good_to_have) if i < len(gv) and gv[i]]
-        return {
-            "essential_matched": essential_matched[:15],
-            "essential_missing": essential_missing[:15],
-            "good_to_have_matched": good_matched[:10],
-            "technical_skills": [s for s in data.get("technical_skills", []) if s][:10],
-            "business_skills": [s for s in data.get("business_skills", []) if s][:8],
-            "soft_skills": [s for s in data.get("soft_skills", []) if s][:8],
-            "significant_experience": [s for s in data.get("significant_experience", []) if s][:6],
-            "certifications_degrees": [s for s in data.get("certifications_degrees", []) if s][:8],
-            "gaps": essential_missing[:10],
-            "summary": (data.get("summary") or "").strip(),
-            "years_experience": int(data.get("years_experience") or 0),
-            "education": _clean_field(data.get("education")),
-            "ai_powered": True,
-        }
+        def _parse(data: dict) -> Optional[dict]:
+            if not data:
+                return None
+            return data
 
-    def _try_ollama() -> Optional[dict]:
-        ollama_mdl = ollama_model or "llama3"
-        raw = _call_ollama(_build_prompt(OLLAMA_DOC_CHARS), ollama_base_url, ollama_mdl)
-        return _build_result(_parse_json_response(raw))
+        return await _race_for(_build, _parse)
 
-    def _try_groq() -> Optional[dict]:
-        from langchain_groq import ChatGroq
-        from langchain.schema import HumanMessage
+    # Split essential into small chunks — each one a separate lightweight
+    # request judged concurrently, rather than one large request judging
+    # all of them (see the docstring for why this is the actual fix).
+    ESSENTIAL_CHUNK_SIZE = 8
+    essential_chunks = [
+        essential[i:i + ESSENTIAL_CHUNK_SIZE]
+        for i in range(0, len(essential), ESSENTIAL_CHUNK_SIZE)
+    ] or [[]]
 
-        # A 413 "request too large / tokens per minute" error is a hard
-        # per-request ceiling for this account tier + model — retrying the
-        # SAME request changes nothing, it needs to be smaller. Some Groq
-        # tiers have quite low limits (seen as low as 6,000 TPM), which a
-        # long resume plus JD requirements plus prompt instructions can
-        # exceed even after truncation to the normal (generous) budget.
-        # Sizes the retry from the EXACT limit/requested numbers in Groq's
-        # own error message (see _safe_retry_chars) rather than guessing
-        # fixed sizes — reaches a size that fits on the first retry
-        # instead of potentially several, each an extra network round-trip
-        # of pure latency for a request already known to fail. This whole
-        # sequence happens inside Groq's single "slot" in the race below —
-        # Ollama isn't held up waiting for it.
-        resume_limit = MAX_DOC_CHARS
-        last_error = None
-        for _attempt in range(4):
-            try:
-                llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low")
-                _t0 = time.time()
-                resp = llm.invoke([HumanMessage(content=_build_prompt(resume_limit))])
-                _elapsed = time.time() - _t0
-                print(f"  TIMING: extract_candidate_strengths Groq call ({groq_model}) took {_elapsed:.2f}s, prompt size {resume_limit} chars")
-                return _build_result(_parse_json_response(resp.content))
-            except Exception as e:
-                last_error = e
-                if _is_token_limit_error(e):
-                    new_limit = _safe_retry_chars(e, resume_limit)
-                    if new_limit:
-                        print(f"  WARNING: extract_candidate_strengths request too large at {resume_limit}-char resume budget, retrying at computed safe size {new_limit} — {str(e)[:150]}")
-                        resume_limit = new_limit
-                        continue
-                raise
-        if last_error:
-            raise last_error
-        return None
+    _t0 = time.time()
+    chunk_results = await asyncio.gather(
+        *[_verdict_chunk(chunk) for chunk in essential_chunks],
+        _good_to_have_and_skills(),
+    )
+    print(f"  TIMING: extract_candidate_strengths total (chunked, concurrent) {time.time() - _t0:.2f}s")
 
-    # ── Race Ollama and Groq concurrently — total latency is bounded by
-    # whichever is faster, not the sum of a failed attempt plus the other.
-    attempts = {}
-    if ollama_base_url:
-        attempts["ollama"] = _try_ollama
-    if groq_key:
-        attempts["groq"] = _try_groq
-    if attempts:
-        _race_t0 = time.time()
-        outcome = await _run_in_llm_pool(race_llm_providers, attempts)
-        _race_elapsed = time.time() - _race_t0
-        if outcome:
-            winner, result = outcome
-            print(f"  TIMING: extract_candidate_strengths total {_race_elapsed:.2f}s, winner: {winner}")
-            return result
-        print(f"  TIMING: extract_candidate_strengths total {_race_elapsed:.2f}s, all providers failed")
+    essential_chunk_verdicts = chunk_results[:-1]
+    gth_and_skills = chunk_results[-1]
 
-    return _fallback_candidate_strengths(resume_text, jd_requirements)
+    if gth_and_skills is None or any(v is None for v in essential_chunk_verdicts):
+        print("  WARNING: extract_candidate_strengths — one or more concurrent chunks failed, falling back to keyword heuristic")
+        return _fallback_candidate_strengths(resume_text, jd_requirements)
+
+    ev: list = []
+    for chunk_verdicts in essential_chunk_verdicts:
+        ev.extend(chunk_verdicts)
+
+    essential_matched = [r for i, r in enumerate(essential) if i < len(ev) and ev[i]]
+    essential_missing = [r for i, r in enumerate(essential) if not (i < len(ev) and ev[i])]
+    gv = gth_and_skills.get("good_to_have_matched") or []
+    good_matched = [r for i, r in enumerate(good_to_have) if i < len(gv) and gv[i]]
+
+    return {
+        "essential_matched": essential_matched[:15],
+        "essential_missing": essential_missing[:15],
+        "good_to_have_matched": good_matched[:10],
+        "technical_skills": [s for s in gth_and_skills.get("technical_skills", []) if s][:10],
+        "business_skills": [s for s in gth_and_skills.get("business_skills", []) if s][:8],
+        "soft_skills": [s for s in gth_and_skills.get("soft_skills", []) if s][:8],
+        "significant_experience": [s for s in gth_and_skills.get("significant_experience", []) if s][:6],
+        "certifications_degrees": [s for s in gth_and_skills.get("certifications_degrees", []) if s][:8],
+        "gaps": essential_missing[:10],
+        "summary": (gth_and_skills.get("summary") or "").strip(),
+        "years_experience": int(gth_and_skills.get("years_experience") or 0),
+        "education": _clean_field(gth_and_skills.get("education")),
+        "ai_powered": True,
+    }
 
 
 async def extract_candidate_strengths_general(
