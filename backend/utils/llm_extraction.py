@@ -102,6 +102,31 @@ def _is_token_limit_error(e: Exception) -> bool:
     return "413" in msg or "too large" in msg or "tokens per minute" in msg or " tpm" in msg
 
 
+def _safe_retry_chars(e: Exception, current_chars: int) -> Optional[int]:
+    """Groq's 413 error message states the exact limit and how much was
+    requested (e.g. "Limit 6000, Requested 7347"). Rather than blindly
+    guessing a smaller fixed size and possibly still being over (or
+    needlessly under) the real limit, compute a precise new character
+    budget from the actual numbers the error already gave us — this
+    reaches a size that fits on the FIRST retry instead of potentially
+    several guesses, each of which is a wasted network round-trip that
+    adds pure latency for a request already known to be doomed. Returns
+    None if the message doesn't match the expected pattern (falls back to
+    the fixed-size retry sequence in that case)."""
+    m = re.search(r"limit\s+(\d+),\s*requested\s+(\d+)", str(e), re.IGNORECASE)
+    if not m:
+        return None
+    limit, requested = int(m.group(1)), int(m.group(2))
+    if requested <= 0 or limit <= 0:
+        return None
+    # 15% safety margin: the 4-chars-per-token estimate is approximate,
+    # and other parts of the prompt (instructions, JD requirement lists)
+    # aren't being scaled down here, only the document text.
+    ratio = (limit / requested) * 0.85
+    new_chars = max(500, int(current_chars * ratio))
+    return new_chars if new_chars < current_chars else None
+
+
 def _call_ollama(prompt: str, base_url: str, model: str, timeout: int = OLLAMA_TIMEOUT_SECONDS) -> str:
     """Same implementation already proven working in routers/jdcreator.py
     — kept identical rather than reinvented, including the proxy bypass
@@ -382,23 +407,29 @@ Return ONLY valid JSON, no markdown, no commentary:
         # Retries with a shrinking budget specifically on a 413 token-limit
         # error rather than giving up immediately — some Groq tiers have
         # per-request limits (seen as low as 6,000 TPM) that a long JD can
-        # exceed even after the normal, generous truncation. This whole
-        # retry sequence happens inside Groq's single "slot" in the race
-        # below — Ollama isn't held up waiting for it.
+        # exceed even after the normal, generous truncation. Sizes the
+        # retry from the EXACT limit/requested numbers in Groq's own error
+        # message (see _safe_retry_chars) rather than guessing fixed sizes
+        # — reaches a size that fits on the first retry instead of
+        # potentially several, each an extra network round-trip of pure
+        # latency for a request already known to fail. This whole sequence
+        # happens inside Groq's single "slot" in the race below — Ollama
+        # isn't held up waiting for it.
+        jd_limit = MAX_DOC_CHARS
         last_error = None
-        for jd_limit in (MAX_DOC_CHARS, 6000, 2500):
+        for _attempt in range(4):
             try:
                 llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0, max_tokens=4000, reasoning_format="hidden")
                 resp = llm.invoke([HumanMessage(content=_build_prompt(jd_limit))])
-                result = _build_result(_parse_json_response(resp.content))
-                if result:
-                    return result
-                return None
+                return _build_result(_parse_json_response(resp.content))
             except Exception as e:
                 last_error = e
-                if _is_token_limit_error(e) and jd_limit != 2500:
-                    print(f"  WARNING: extract_jd_requirements_categorized request too large at {jd_limit}-char JD budget, retrying smaller — {str(e)[:200]}")
-                    continue
+                if _is_token_limit_error(e):
+                    new_limit = _safe_retry_chars(e, jd_limit)
+                    if new_limit:
+                        print(f"  WARNING: extract_jd_requirements_categorized request too large at {jd_limit}-char JD budget, retrying at computed safe size {new_limit} — {str(e)[:150]}")
+                        jd_limit = new_limit
+                        continue
                 raise
         if last_error:
             raise last_error
@@ -591,22 +622,28 @@ booleans in order:
         # tiers have quite low limits (seen as low as 6,000 TPM), which a
         # long resume plus JD requirements plus prompt instructions can
         # exceed even after truncation to the normal (generous) budget.
-        # This whole retry sequence happens inside Groq's single "slot" in
-        # the race below — Ollama isn't held up waiting for it.
+        # Sizes the retry from the EXACT limit/requested numbers in Groq's
+        # own error message (see _safe_retry_chars) rather than guessing
+        # fixed sizes — reaches a size that fits on the first retry
+        # instead of potentially several, each an extra network round-trip
+        # of pure latency for a request already known to fail. This whole
+        # sequence happens inside Groq's single "slot" in the race below —
+        # Ollama isn't held up waiting for it.
+        resume_limit = MAX_DOC_CHARS
         last_error = None
-        for resume_limit in (MAX_DOC_CHARS, 6000, 2500):
+        for _attempt in range(4):
             try:
                 llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0, max_tokens=4000, reasoning_format="hidden")
                 resp = llm.invoke([HumanMessage(content=_build_prompt(resume_limit))])
-                result = _build_result(_parse_json_response(resp.content))
-                if result:
-                    return result
-                return None
+                return _build_result(_parse_json_response(resp.content))
             except Exception as e:
                 last_error = e
-                if _is_token_limit_error(e) and resume_limit != 2500:
-                    print(f"  WARNING: extract_candidate_strengths request too large at {resume_limit}-char resume budget, retrying smaller — {str(e)[:200]}")
-                    continue
+                if _is_token_limit_error(e):
+                    new_limit = _safe_retry_chars(e, resume_limit)
+                    if new_limit:
+                        print(f"  WARNING: extract_candidate_strengths request too large at {resume_limit}-char resume budget, retrying at computed safe size {new_limit} — {str(e)[:150]}")
+                        resume_limit = new_limit
+                        continue
                 raise
         if last_error:
             raise last_error
