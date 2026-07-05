@@ -20,7 +20,7 @@ from schemas.schemas import (
     MatchRequest, JobMatchOut, JobOut,
 )
 from utils.auth_utils import get_current_user
-from utils.credentials import get_credential, get_groq_model, get_all_credentials
+from utils.credentials import get_credential, get_groq_model, get_all_credentials, ollama_enabled
 from utils.sequencing import next_sequence_number
 from agents.jobhunt_agent import (
     scrape_jobs_adzuna, parse_resume_text,
@@ -315,7 +315,7 @@ async def match_resume(
 
     groq_key = await _get_user_api_key(current_user.id, "groq", "api_key", db)
     groq_model = await get_groq_model(db, current_user.id)
-    ollama_creds = await get_all_credentials(db, current_user.id, "ollama")
+    ollama_creds = await get_all_credentials(db, current_user.id, "ollama") if ollama_enabled() else {}
     ollama_base_url = ollama_creds.get("base_url")
     ollama_model = ollama_creds.get("model")
     from utils.llm_extraction import get_taxonomy_hint

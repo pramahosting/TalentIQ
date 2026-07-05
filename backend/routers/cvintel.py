@@ -15,7 +15,7 @@ from sqlalchemy import select
 from db.database import get_db
 from models.models import User, UserAPIKey, CVAnalysisRecord
 from utils.auth_utils import get_current_user
-from utils.credentials import get_credential, get_groq_model, get_all_credentials, DEFAULT_GROQ_MODEL
+from utils.credentials import get_credential, get_groq_model, get_all_credentials, ollama_enabled, DEFAULT_GROQ_MODEL
 from utils.sequencing import next_sequence_number
 
 router = APIRouter()
@@ -543,7 +543,7 @@ async def analyze_resume(
     # ── Score (structured JD/requirement extraction + deterministic weighting) ──
     groq_key = await get_credential(db, current_user.id, "groq", "api_key")
     groq_model = await get_groq_model(db, current_user.id)
-    ollama_creds = await get_all_credentials(db, current_user.id, "ollama")
+    ollama_creds = await get_all_credentials(db, current_user.id, "ollama") if ollama_enabled() else {}
     ollama_base_url = ollama_creds.get("base_url")
     ollama_model = ollama_creds.get("model")
 

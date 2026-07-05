@@ -32,7 +32,7 @@ from pydantic import BaseModel
 from db.database import get_db, AsyncSessionLocal
 from models.models import User, UserAPIKey, JobLensSession, JobLensCandidate
 from utils.auth_utils import get_current_user
-from utils.credentials import get_credential, get_all_credentials, get_groq_model, DEFAULT_GROQ_MODEL
+from utils.credentials import get_credential, get_all_credentials, get_groq_model, ollama_enabled, DEFAULT_GROQ_MODEL
 from utils.sequencing import next_sequence_number
 
 router = APIRouter()
@@ -878,7 +878,7 @@ async def run_joblens(
     # ── Get Groq key (own key first, falls back to admin-configured global) ──
     groq_key = await get_credential(db, current_user.id, "groq", "api_key")
     groq_model = await get_groq_model(db, current_user.id)
-    ollama_creds = await get_all_credentials(db, current_user.id, "ollama")
+    ollama_creds = await get_all_credentials(db, current_user.id, "ollama") if ollama_enabled() else {}
     ollama_base_url = ollama_creds.get("base_url")
     ollama_model = ollama_creds.get("model")
     from utils.llm_extraction import get_taxonomy_hint, enrich_skill_taxonomy

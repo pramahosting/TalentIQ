@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from db.database import get_db
 from models.models import User, UserAPIKey, JDDocument
 from utils.auth_utils import get_current_user
-from utils.credentials import get_credential, get_all_credentials, get_groq_model, DEFAULT_GROQ_MODEL
+from utils.credentials import get_credential, get_all_credentials, get_groq_model, ollama_enabled, DEFAULT_GROQ_MODEL
 from utils.sequencing import next_sequence_number
 
 router = APIRouter()
@@ -183,18 +183,18 @@ async def _generate_jd_content(
         except Exception as e:
             errors.append(f"Groq error: {str(e)[:150]}")
 
-    ollama_url = ollama_base_url or "http://localhost:11434"
-    ollama_mdl = ollama_model or "llama3"
-    try:
-        raw = _call_ollama(prompt, ollama_url, ollama_mdl)
-        parsed = _parse_jd_json(raw)
-        if parsed:
-            parsed["ai_powered"] = True
-            parsed["llm_provider"] = "ollama"
-            return parsed
-        errors.append("Ollama returned an unparseable response.")
-    except Exception as e:
-        errors.append(f"Ollama ({ollama_url}) error: {str(e)[:150]}")
+    if ollama_enabled() and ollama_base_url:
+        ollama_mdl = ollama_model or "llama3"
+        try:
+            raw = _call_ollama(prompt, ollama_base_url, ollama_mdl)
+            parsed = _parse_jd_json(raw)
+            if parsed:
+                parsed["ai_powered"] = True
+                parsed["llm_provider"] = "ollama"
+                return parsed
+            errors.append("Ollama returned an unparseable response.")
+        except Exception as e:
+            errors.append(f"Ollama ({ollama_base_url}) error: {str(e)[:150]}")
 
     raise HTTPException(
         400,
@@ -386,7 +386,7 @@ async def generate_jd(
 
     groq_key = await get_credential(db, current_user.id, "groq", "api_key")
 
-    ollama_keys = await get_all_credentials(db, current_user.id, "ollama")
+    ollama_keys = await get_all_credentials(db, current_user.id, "ollama") if ollama_enabled() else {}
     ollama_base_url = ollama_keys.get("base_url")
     ollama_model = ollama_keys.get("model")
     groq_model = await get_groq_model(db, current_user.id)

@@ -18,10 +18,28 @@ drift or be accidentally bypassed in one module but not another):
     never visible to, or usable by, any other user — including admins.
 """
 from typing import Optional
+import os
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from models.models import UserAPIKey
+
+
+def ollama_enabled() -> bool:
+    """Explicit per-environment kill-switch for Ollama, independent of
+    whether an Ollama credential happens to exist in the database.
+
+    Set OLLAMA_ENABLED=false in this environment's variables (e.g. the
+    Northflank production deployment) to GUARANTEE Ollama is never
+    attempted here, no matter what — rather than relying on remembering
+    not to configure a base_url/model row, which a future admin action or
+    an accidentally-copied database could silently reintroduce.
+
+    Defaults to enabled (true) when unset, so local development
+    environments keep racing against a local Ollama instance exactly as
+    before — this only needs to be set explicitly in the environments
+    where Ollama should be hard-disabled."""
+    return os.getenv("OLLAMA_ENABLED", "true").strip().lower() not in ("false", "0", "no", "off")
 
 # Only these services may ever have a shared/global fallback. Adding a
 # service here is a deliberate security decision — do not add personal
