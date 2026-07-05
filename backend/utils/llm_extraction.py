@@ -32,6 +32,7 @@ comprehensive the more the system is used.
 """
 import json
 import re
+import time
 import requests
 import asyncio
 import concurrent.futures
@@ -285,11 +286,21 @@ async def enrich_skill_taxonomy(db, skills_by_category: dict) -> None:
         from models.models import SkillTaxonomy
 
         now = datetime.utcnow()
+        # Tracks skill names already handled (found-and-bumped, or newly
+        # added) WITHIN this single call — without this, the same
+        # normalized term appearing in more than one category (or twice in
+        # the same list) would query the DB, find nothing yet because
+        # nothing's been committed, and get added twice in the same
+        # transaction: a guaranteed unique-constraint violation on commit.
+        already_handled: set = set()
         for category, terms in (skills_by_category or {}).items():
             for term in (terms or []):
                 normalized = (term or "").strip().lower()
                 if not normalized or len(normalized) > 200:
                     continue
+                if normalized in already_handled:
+                    continue
+                already_handled.add(normalized)
                 existing = (await db.execute(
                     select(SkillTaxonomy).where(SkillTaxonomy.skill_name == normalized)
                 )).scalar_one_or_none()
@@ -452,7 +463,10 @@ Return ONLY valid JSON, no markdown, no commentary:
         for _attempt in range(4):
             try:
                 llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0, max_tokens=4000, reasoning_format="hidden")
+                _t0 = time.time()
                 resp = llm.invoke([HumanMessage(content=_build_prompt(jd_limit))])
+                _elapsed = time.time() - _t0
+                print(f"  TIMING: extract_jd_requirements_categorized Groq call ({groq_model}) took {_elapsed:.2f}s, prompt size {jd_limit} chars")
                 return _build_result(_parse_json_response(resp.content))
             except Exception as e:
                 last_error = e
@@ -475,10 +489,14 @@ Return ONLY valid JSON, no markdown, no commentary:
     if groq_key:
         attempts["groq"] = _try_groq
     if attempts:
+        _race_t0 = time.time()
         outcome = await _run_in_llm_pool(race_llm_providers, attempts)
+        _race_elapsed = time.time() - _race_t0
         if outcome:
-            _, result = outcome
+            winner, result = outcome
+            print(f"  TIMING: extract_jd_requirements_categorized total {_race_elapsed:.2f}s, winner: {winner}")
             return result
+        print(f"  TIMING: extract_jd_requirements_categorized total {_race_elapsed:.2f}s, all providers failed")
 
     return _fallback_jd_requirements(jd_text)
 
@@ -665,7 +683,10 @@ booleans in order:
         for _attempt in range(4):
             try:
                 llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0, max_tokens=4000, reasoning_format="hidden")
+                _t0 = time.time()
                 resp = llm.invoke([HumanMessage(content=_build_prompt(resume_limit))])
+                _elapsed = time.time() - _t0
+                print(f"  TIMING: extract_candidate_strengths Groq call ({groq_model}) took {_elapsed:.2f}s, prompt size {resume_limit} chars")
                 return _build_result(_parse_json_response(resp.content))
             except Exception as e:
                 last_error = e
@@ -688,10 +709,14 @@ booleans in order:
     if groq_key:
         attempts["groq"] = _try_groq
     if attempts:
+        _race_t0 = time.time()
         outcome = await _run_in_llm_pool(race_llm_providers, attempts)
+        _race_elapsed = time.time() - _race_t0
         if outcome:
-            _, result = outcome
+            winner, result = outcome
+            print(f"  TIMING: extract_candidate_strengths total {_race_elapsed:.2f}s, winner: {winner}")
             return result
+        print(f"  TIMING: extract_candidate_strengths total {_race_elapsed:.2f}s, all providers failed")
 
     return _fallback_candidate_strengths(resume_text, jd_requirements)
 
