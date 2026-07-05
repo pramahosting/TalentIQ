@@ -464,12 +464,6 @@ export default function CVAnalysisPage() {
               </span>
             </div>
           ))}
-          {isAdmin && result.note && (
-            <div style={{ marginBottom: 16, padding: "10px 14px", background: "rgba(139,92,246,.08)",
-              border: "1px solid rgba(139,92,246,.2)", borderRadius: 8, fontSize: 13, color: "var(--violet-500)" }}>
-              💡 {result.note}
-            </div>
-          )}
 
           {/* ── Candidate + JD summary cards ── */}
           {(candidateInfo || jdInfo) && (
