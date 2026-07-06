@@ -1,8 +1,8 @@
 import { useNavigate } from "react-router-dom";
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Settings, Key, User, Shield, Trash2 , Home} from "lucide-react";
-import { authApi } from "../lib/api";
+import { authApi, groqPoolApi } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
 
 export default function SettingsPage() {
@@ -53,6 +53,64 @@ export default function SettingsPage() {
   const globalServiceSet = new Set(globalKeys.map((k: any) => k.service));
   const SHAREABLE = ["groq", "ollama", "adzuna"];
   const [globalToggle, setGlobalToggle] = useState<Record<string, boolean>>({});
+
+  // ── GROQ KEY POOL (admin only) ───────────────────────────────────
+  const { data: poolKeys = [], refetch: refetchPool } = useQuery({
+    queryKey: ["groq-pool"], queryFn: groqPoolApi.list, enabled: isAdmin,
+  });
+  const [newPoolKey, setNewPoolKey] = useState({ key_value: "", model: "" });
+  // Pulled live from Groq's own API using the key just typed in, rather
+  // than a hardcoded list — a fixed list is exactly the kind of thing
+  // that goes stale the moment Groq adds or retires a model (hit this
+  // directly, twice, earlier this session).
+  const [fetchedModels, setFetchedModels] = useState<string[] | null>(null);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [modelsFetchError, setModelsFetchError] = useState("");
+  const fetchModelsForKey = async (keyOverride?: string) => {
+    const key = (keyOverride ?? newPoolKey.key_value).trim();
+    if (!key) { setModelsFetchError("Enter the API key above first."); return; }
+    setFetchingModels(true); setModelsFetchError(""); setFetchedModels(null);
+    try {
+      const res = await groqPoolApi.listModels(key);
+      setFetchedModels(res.models || []);
+    } catch (e: any) {
+      setModelsFetchError(e.response?.data?.detail || "Could not fetch models for this key.");
+    } finally {
+      setFetchingModels(false);
+    }
+  };
+  // Auto-fetches shortly after the user stops typing/pasting a
+  // plausible-looking key — no extra click needed, models just show up
+  // the way they would if you were looking at Groq's own console. The
+  // manual button stays as a fallback (e.g. to retry after a transient
+  // network error) but isn't the primary path anymore.
+  const autoFetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (autoFetchTimer.current) clearTimeout(autoFetchTimer.current);
+    const key = newPoolKey.key_value.trim();
+    if (key.length < 20) return; // too short to plausibly be a real key yet
+    autoFetchTimer.current = setTimeout(() => { fetchModelsForKey(key); }, 600);
+    return () => { if (autoFetchTimer.current) clearTimeout(autoFetchTimer.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [newPoolKey.key_value]);
+  const [poolMsg, setPoolMsg] = useState("");
+  const flashPool = (m: string) => { setPoolMsg(m); setTimeout(() => setPoolMsg(""), 3000); };
+
+  const addPoolMut = useMutation({
+    mutationFn: () => groqPoolApi.add({ key_value: newPoolKey.key_value.trim(), model: newPoolKey.model.trim() || undefined }),
+    onSuccess: () => { refetchPool(); setNewPoolKey({ key_value: "", model: "" }); setFetchedModels(null); setModelsFetchError(""); flashPool("Key added to pool."); },
+    onError: (e: any) => flashPool(`❌ ${e.response?.data?.detail || "Failed to add key"}`),
+  });
+  const togglePoolMut = useMutation({
+    mutationFn: ({ id, is_active }: { id: number; is_active: boolean }) => groqPoolApi.update(id, { is_active }),
+    onSuccess: () => refetchPool(),
+    onError: (e: any) => flashPool(`❌ ${e.response?.data?.detail || "Failed to update key"}`),
+  });
+  const removePoolMut = useMutation({
+    mutationFn: (id: number) => groqPoolApi.remove(id),
+    onSuccess: () => { refetchPool(); flashPool("Key removed from pool."); },
+    onError: (e: any) => flashPool(`❌ ${e.response?.data?.detail || "Failed to remove key"}`),
+  });
 
   const saveKey = async (service: string, fields: Record<string, string>) => {
     const entries = Object.entries(fields).filter(([, v]) => v.trim() !== "");
@@ -199,23 +257,136 @@ export default function SettingsPage() {
 
           {isAdmin ? (
             <div className="tiq-card tiq-mb-6">
-              <div className="tiq-card-title">Groq — AI / LLM API</div>
-              <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
-                Free at <a href="https://console.groq.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>console.groq.com</a>. Enables AI resume matching and cover letter generation.
+              <div className="tiq-card-title">Groq Key Pool — scale capacity automatically</div>
+              <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 16 }}>
+                Add multiple Groq keys here (from separate Groq accounts if you want real added
+                throughput — Groq's rate limits apply per account, not per key). The platform
+                automatically spreads load across whichever keys are healthy, and routes around
+                any that are temporarily rate-limited, recovering them automatically once they
+                cool down.
               </p>
-              {inp("API Key", groq.api_key, v => setGroq(g => ({ ...g, api_key: v })), "password", "gsk_…")}
-              {inp("Model", groq.model, v => setGroq(g => ({ ...g, model: v })), "text", "e.g. openai/gpt-oss-120b")}
-              <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: -6, marginBottom: 10 }}>
-                Leave blank to use the platform default. See{" "}
-                <a href="https://console.groq.com/docs/models" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>
-                  console.groq.com/docs/models
-                </a>{" "}
-                for currently supported models — Groq periodically retires older ones.
-              </p>
-              {globalCheckbox("groq")}
-              <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("groq", groq)} disabled={savingService === "groq"}>
-                {savingService === "groq" ? "Saving…" : "Save Groq Key"}
-              </button>
+
+              {poolMsg && (
+                <div style={{ fontSize: 12, marginBottom: 12, padding: "8px 12px", borderRadius: 6,
+                  background: poolMsg.startsWith("❌") ? "rgba(239,68,68,.08)" : "rgba(20,184,166,.08)",
+                  color: poolMsg.startsWith("❌") ? "#ef4444" : "var(--teal-500)" }}>
+                  {poolMsg}
+                </div>
+              )}
+
+              {poolKeys.length > 0 && (
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.4 }}>
+                    Keys in pool ({poolKeys.length})
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {(() => {
+                      // Numbered by chronological addition order (oldest = #1),
+                      // not by current display position — the list itself
+                      // shows newest-first, but "key #1" should always mean
+                      // "the first one I added", not shift around based on
+                      // display order.
+                      const byAddedAsc = [...poolKeys].sort((a: any, b: any) =>
+                        new Date(a.added_at || 0).getTime() - new Date(b.added_at || 0).getTime()
+                      );
+                      const numberOf = new Map(byAddedAsc.map((k: any, i: number) => [k.id, i + 1]));
+                      return poolKeys.map((k: any) => (
+                      <div key={k.id} style={{
+                        display: "flex", alignItems: "center", gap: 10, padding: "8px 12px",
+                        border: "1px solid var(--border)", borderRadius: 8,
+                        opacity: k.is_active ? 1 : 0.5,
+                      }}>
+                        <span style={{
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          width: 24, height: 24, borderRadius: 6, flexShrink: 0,
+                          background: "var(--surface-2, rgba(0,0,0,.06))", fontSize: 11, fontWeight: 700,
+                          color: "var(--text-muted)",
+                        }}>
+                          {numberOf.get(k.id)}
+                        </span>
+                        <span style={{ fontFamily: "monospace", fontSize: 13 }}>{k.key_preview}</span>
+                        <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{k.model || "platform default"}</span>
+                        {k.cooldown_until && new Date(k.cooldown_until) > new Date() && (
+                          <span style={{ fontSize: 11, color: "#f59e0b" }}>⏳ cooling down</span>
+                        )}
+                        {!k.is_active && <span style={{ fontSize: 11, color: "var(--text-muted)" }}>disabled</span>}
+                        <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+                          <button
+                            className="tiq-btn tiq-btn-sm"
+                            onClick={() => togglePoolMut.mutate({ id: k.id, is_active: !k.is_active })}
+                          >
+                            {k.is_active ? "Disable" : "Enable"}
+                          </button>
+                          <button
+                            className="tiq-btn tiq-btn-sm"
+                            style={{ color: "#ef4444" }}
+                            onClick={() => { if (confirm("Remove this key from the pool?")) removePoolMut.mutate(k.id); }}
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      </div>
+                      ));
+                    })()}
+                  </div>
+                </div>
+              )}
+
+              <div style={{ borderTop: "1px solid var(--border)", paddingTop: 16 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", marginBottom: 10, textTransform: "uppercase", letterSpacing: 0.4 }}>
+                  Add a new key — will become Key #{poolKeys.length + 1}
+                </div>
+
+                {inp("API Key", newPoolKey.key_value, v => { setNewPoolKey(k => ({ ...k, key_value: v })); setFetchedModels(null); setModelsFetchError(""); }, "password", "gsk_…")}
+
+                <div style={{ marginBottom: 4, display: "flex", alignItems: "center", gap: 10 }}>
+                  {fetchingModels && (
+                    <span style={{ fontSize: 12, color: "var(--text-muted)" }}>Checking with Groq…</span>
+                  )}
+                  {!fetchingModels && fetchedModels && (
+                    <span style={{ fontSize: 12, color: "var(--teal-500)" }}>✓ {fetchedModels.length} models available for this key</span>
+                  )}
+                  {!fetchingModels && !fetchedModels && !modelsFetchError && newPoolKey.key_value.trim().length > 0 && (
+                    <span style={{ fontSize: 12, color: "var(--text-muted)" }}>Models will load automatically once the key looks complete…</span>
+                  )}
+                  <button
+                    type="button"
+                    className="tiq-btn tiq-btn-sm"
+                    onClick={() => fetchModelsForKey()}
+                    disabled={fetchingModels || !newPoolKey.key_value.trim()}
+                  >
+                    {fetchedModels ? "Refetch" : "Fetch now"}
+                  </button>
+                  {modelsFetchError && <span style={{ fontSize: 12, color: "#ef4444" }}>{modelsFetchError}</span>}
+                </div>
+
+                <div style={{ marginTop: 12, marginBottom: 14 }}>
+                  <label style={{ display: "block", fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>Model</label>
+                  {fetchedModels ? (
+                    <select
+                      value={newPoolKey.model}
+                      onChange={e => setNewPoolKey(k => ({ ...k, model: e.target.value }))}
+                      className="tiq-input"
+                      style={{ width: "100%" }}
+                    >
+                      <option value="">Platform default</option>
+                      {fetchedModels.map(m => <option key={m} value={m}>{m}</option>)}
+                    </select>
+                  ) : (
+                    <>
+                      {inp("", newPoolKey.model, v => setNewPoolKey(k => ({ ...k, model: v })), "text", "leave blank for platform default, or fetch models above to pick from a live list")}
+                    </>
+                  )}
+                </div>
+
+                <button
+                  className="tiq-btn tiq-btn-primary"
+                  onClick={() => addPoolMut.mutate()}
+                  disabled={addPoolMut.isPending || !newPoolKey.key_value.trim()}
+                >
+                  {addPoolMut.isPending ? "Adding…" : `Add as Key #${poolKeys.length + 1}`}
+                </button>
+              </div>
             </div>
           ) : null}
 

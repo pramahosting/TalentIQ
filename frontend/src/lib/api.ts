@@ -38,6 +38,14 @@ export const authApi = {
   deactivateUser: (id: number) => api.put(`/api/auth/users/${id}/deactivate`).then((r) => r.data),
 };
 
+export const groqPoolApi = {
+  list: () => api.get("/api/admin/groq-pool").then((r) => r.data),
+  add: (data: { key_value: string; model?: string }) => api.post("/api/admin/groq-pool", data).then((r) => r.data),
+  update: (id: number, data: { is_active?: boolean; model?: string }) => api.patch(`/api/admin/groq-pool/${id}`, data).then((r) => r.data),
+  remove: (id: number) => api.delete(`/api/admin/groq-pool/${id}`).then((r) => r.data),
+  listModels: (key_value: string) => api.post("/api/admin/groq-pool/models", { key_value }).then((r) => r.data),
+};
+
 export const jobhuntApi = {
   uploadResume: (file: File) => {
     const form = new FormData();
