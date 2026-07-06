@@ -377,16 +377,16 @@ export default function CVAnalysisPage() {
             This keeps running even if you switch to another page.
           </div>
         )}
-        {!resumeReady || !jdReady ? (
+        {(!resumeReady || !jdReady) ? (
           <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
             {!resumeReady && "Upload or paste resume · "}
             {!jdReady && "Upload or paste job description"}
           </div>
-        ) : (
+        ) : result ? (
           <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
-            {result ? "Files kept — update them above and re-analyse anytime" : "Add a Groq API key in Settings for AI-powered analysis"}
+            Files kept — update them above and re-analyse anytime
           </div>
-        )}
+        ) : null}
       </div>
 
       {/* ── Session History ── */}
