@@ -837,6 +837,14 @@ Return ONLY valid JSON, no markdown, no commentary:
     )
     print(f"  TIMING: extract_candidate_strengths total (chunked, concurrent) {time.time() - _t0:.2f}s")
 
+    # Clear, single-line summary of every DISTINCT key this analysis
+    # actually drew from — since chunking can genuinely span multiple
+    # pool keys, piecing that together from scattered per-chunk log lines
+    # isn't practical. This is the line to look for when you need "which
+    # account(s) served this specific request".
+    distinct_key_previews = sorted(set(_mask_key_for_log(k[0]) for k in resolved_keys if k[0]))
+    print(f"  SUMMARY: extract_candidate_strengths used {len(distinct_key_previews)} distinct key(s): {', '.join(distinct_key_previews) if distinct_key_previews else '(none)'}")
+
     # Now that all concurrent work is done, report each pool key's outcome
     # sequentially — same reasoning as above, this is a DB write and must
     # not race with any other DB access on this session.
@@ -878,6 +886,7 @@ Return ONLY valid JSON, no markdown, no commentary:
         "years_experience": int(gth_and_skills.get("years_experience") or 0),
         "education": _clean_field(gth_and_skills.get("education")),
         "ai_powered": True,
+        "_groqKeyPreviews": distinct_key_previews,
     }
 
 
