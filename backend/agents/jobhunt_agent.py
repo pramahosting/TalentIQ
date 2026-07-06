@@ -519,7 +519,7 @@ def generate_cover_letter(
     if groq_api_key and _GROQ_AVAILABLE and ChatGroq:
         try:
             from utils.llm_extraction import _truncate_for_llm
-            llm = ChatGroq(api_key=groq_api_key, model=groq_model, temperature=0.5, max_tokens=4000, reasoning_format="hidden")
+            llm = ChatGroq(api_key=groq_api_key, model=groq_model, temperature=0.5, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
             prompt = (
                 f"Write a professional, concise cover letter for {candidate_name} "
                 f"applying for the {job_title} role at {company}.\n\n"
@@ -572,7 +572,7 @@ def build_jobhunt_agent(groq_api_key: str) -> AgentExecutor:
     """Build a LangChain ReAct agent wrapping JobHunt tools"""
     if not _GROQ_AVAILABLE or not ChatGroq:
         raise RuntimeError("langchain-groq is not installed. Run: pip install langchain-groq")
-    llm = ChatGroq(api_key=groq_api_key, model=DEFAULT_GROQ_MODEL, temperature=0, max_tokens=4000, reasoning_format="hidden")
+    llm = ChatGroq(api_key=groq_api_key, model=DEFAULT_GROQ_MODEL, temperature=0, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
 
     tools = [
         Tool(
