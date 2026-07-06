@@ -164,6 +164,20 @@ def _is_rate_limit_error(e: Exception) -> bool:
     return "429" in msg or "rate limit reached" in msg or "rate_limit_exceeded" in msg
 
 
+def _is_tpm_error(e: Exception) -> bool:
+    """Distinguishes a TOKENS-per-minute limit from a requests-per-minute
+    one — confirmed directly from a real production log where 3 concurrent
+    chunks hit this exact error, waited 5s, retried, and hit it again.
+    TPM uses a rolling 60-second window: a short wait doesn't meaningfully
+    reduce "tokens used in the last 60 seconds" the way it would for a
+    simple request-count limit, since the tokens already sent are still
+    inside that window. A 5-second wait was never going to clear this —
+    it needs to wait closer to the actual window, not a token-agnostic
+    short retry."""
+    msg = str(e).lower()
+    return "tokens per minute" in msg or " tpm" in msg or "tpm)" in msg
+
+
 def _parse_retry_after_seconds(e: Exception, cap: float = 5.0) -> float:
     """Groq's 429 error message often includes a suggested wait, e.g.
     "Please try again in 6m11.52s" — parsed here so the retry waits a
@@ -229,7 +243,7 @@ def _call_ollama(prompt: str, base_url: str, model: str, timeout: int = OLLAMA_T
     return data.get("response", "")
 
 
-def race_llm_providers(attempts: dict) -> Optional[tuple]:
+def race_llm_providers(attempts: dict) -> dict:
     """Runs multiple LLM provider attempts CONCURRENTLY (in real OS threads,
     since both `requests` and langchain's ChatGroq.invoke are blocking
     calls) and returns the result from whichever succeeds FIRST, without
@@ -243,8 +257,15 @@ def race_llm_providers(attempts: dict) -> Optional[tuple]:
     of seconds.
 
     attempts: {name: zero-arg callable returning a dict, or raising/
-    returning None on failure}. Returns (name, result) from the first
-    callable to return a truthy result, or None if all of them fail.
+    returning None on failure}.
+
+    Returns {"winner": name|None, "result": dict|None,
+    "is_rate_limit_failure": bool} — the last field matters specifically
+    for the pool: a plain failure (bad key, parse error) isn't worth
+    retrying with a different key, but a rate-limit failure means the
+    key itself is fine, just temporarily throttled — worth telling the
+    async caller so it can mark this key cooling down and try a
+    genuinely different one, rather than giving up entirely.
 
     Deliberately does NOT use `with ThreadPoolExecutor() as executor:` —
     that context manager's __exit__ calls shutdown(wait=True), which
@@ -259,20 +280,23 @@ def race_llm_providers(attempts: dict) -> Optional[tuple]:
     import concurrent.futures
 
     if not attempts:
-        return None
+        return {"winner": None, "result": None, "is_rate_limit_failure": False}
     if len(attempts) == 1:
         name, fn = next(iter(attempts.items()))
         try:
             result = fn()
-            return (name, result) if result else None
+            if result:
+                return {"winner": name, "result": result, "is_rate_limit_failure": False}
+            return {"winner": None, "result": None, "is_rate_limit_failure": False}
         except Exception as e:
             print(f"  WARNING: {name} provider failed — {type(e).__name__}: {str(e)[:200]}")
-            return None
+            return {"winner": None, "result": None, "is_rate_limit_failure": _is_rate_limit_error(e)}
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(attempts))
     future_to_name = {executor.submit(fn): name for name, fn in attempts.items()}
     errors = []
     winner = None
+    any_rate_limit = False
     try:
         for future in concurrent.futures.as_completed(future_to_name):
             name = future_to_name[future]
@@ -284,12 +308,15 @@ def race_llm_providers(attempts: dict) -> Optional[tuple]:
                 errors.append(f"{name}: empty/unparseable response")
             except Exception as e:
                 errors.append(f"{name}: {type(e).__name__}: {str(e)[:150]}")
+                if name == "groq" and _is_rate_limit_error(e):
+                    any_rate_limit = True
     finally:
         executor.shutdown(wait=False)
 
     if winner is None:
         print(f"  WARNING: all LLM providers failed in race — {'; '.join(errors)}")
-    return winner
+        return {"winner": None, "result": None, "is_rate_limit_failure": any_rate_limit}
+    return {"winner": winner[0], "result": winner[1], "is_rate_limit_failure": False}
 
 
 async def get_taxonomy_hint(db, category: Optional[str] = None, limit: int = 30) -> List[str]:
@@ -524,11 +551,10 @@ Return ONLY valid JSON, no markdown, no commentary:
                         print(f"  WARNING: extract_jd_requirements_categorized request too large at {jd_limit}-char JD budget, retrying at computed safe size {new_limit} — {str(e)[:150]}")
                         jd_limit = new_limit
                         continue
-                if _is_rate_limit_error(e) and _attempt < 2:
-                    wait = _parse_retry_after_seconds(e, cap=5.0)
-                    print(f"  WARNING: extract_jd_requirements_categorized hit a rate limit, waiting {wait:.1f}s and retrying (this is transient, not a request-size problem) — {str(e)[:150]}")
-                    time.sleep(wait)
-                    continue
+                # Rate limits are NOT retried here with the same key — the
+                # outer loop (see below) rotates to a genuinely different
+                # pool key instead, which is the actual fix rather than
+                # waiting and hoping the identical key recovers.
                 raise
         if last_error:
             raise last_error
@@ -548,23 +574,46 @@ Return ONLY valid JSON, no markdown, no commentary:
 
     # ── Race Ollama and Groq concurrently — total latency is bounded by
     # whichever is faster, not the sum of a failed attempt plus the other.
-    attempts = {}
-    if ollama_base_url:
-        attempts["ollama"] = _try_ollama
-    if groq_key:
-        attempts["groq"] = _try_groq
-    if attempts:
+    for _outer_attempt in range(2):
+        attempts = {}
+        if ollama_base_url:
+            attempts["ollama"] = _try_ollama
+        if groq_key:
+            attempts["groq"] = _try_groq
+        if not attempts:
+            break
         _race_t0 = time.time()
         outcome = await _run_in_llm_pool(race_llm_providers, attempts)
         _race_elapsed = time.time() - _race_t0
-        if _pool_id is not None and not ollama_base_url:
-            from utils.groq_pool import record_key_outcome
-            await record_key_outcome(db, _pool_id, success=outcome is not None)
-        if outcome:
-            winner, result = outcome
+        winner, result, is_rate_limit = outcome["winner"], outcome["result"], outcome["is_rate_limit_failure"]
+
+        if winner:
+            if _pool_id is not None:
+                from utils.groq_pool import record_key_outcome
+                await record_key_outcome(db, _pool_id, success=True)
             print(f"  TIMING: extract_jd_requirements_categorized total {_race_elapsed:.2f}s, winner: {winner}")
             return result
+
         print(f"  TIMING: extract_jd_requirements_categorized total {_race_elapsed:.2f}s, all providers failed")
+
+        # A rate-limit failure means the KEY is fine, just temporarily
+        # throttled — mark it cooling down and ask the pool for a
+        # genuinely different one, rather than giving up. This is the
+        # actual fix for a real bug found directly in production logs:
+        # the previous version waited and retried the IDENTICAL key that
+        # had just been rate-limited, which obviously never helped and
+        # defeated the entire purpose of having multiple pool keys.
+        if is_rate_limit and _pool_id is not None and db is not None and user_id is not None and _outer_attempt == 0:
+            from utils.groq_pool import record_key_outcome, resolve_groq_key
+            await record_key_outcome(db, _pool_id, success=False)
+            _kr = await resolve_groq_key(db, user_id)
+            if _kr["groq_key"] and _kr["key_preview"] != _mask_key_for_log(groq_key):
+                print(f"  WARNING: extract_jd_requirements_categorized — key {_mask_key_for_log(groq_key)} was rate-limited, retrying with a different pool key {_kr['key_preview']}")
+                groq_key = _kr["groq_key"]
+                groq_model = _kr["model"] or groq_model
+                _pool_id = _kr["pool_id"] if _kr["source"] == "pool" else None
+                continue
+        break
 
     return _fallback_jd_requirements(jd_text)
 
@@ -594,6 +643,134 @@ def _fallback_jd_requirements(jd_text: str, domain_skills: Optional[List[str]] =
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# RESUME FACTS — pure resume-level extraction, deliberately independent of
+# any specific JD's requirements (see docstring below for why this exists
+# as its own function)
+# ══════════════════════════════════════════════════════════════════════════
+
+async def extract_resume_facts(
+    resume_text: str, groq_key: Optional[str], groq_model: str,
+    ollama_base_url: Optional[str] = None, ollama_model: Optional[str] = None,
+    db=None, user_id: Optional[int] = None,
+) -> Optional[dict]:
+    """Returns:
+    {"technical_skills": [...], "business_skills": [...], "soft_skills": [...],
+     "significant_experience": [...], "certifications_degrees": [...],
+     "summary": str, "years_experience": int, "education": str,
+     "ai_powered": bool}
+
+    Deliberately extracts ONLY facts about the resume itself — what skills
+    it shows, how much experience, what education — with no reference to
+    any specific job's requirements at all. This used to be bundled into
+    the SAME call as good-to-have JD matching (see extract_candidate_
+    strengths below), which meant it could only start after JD
+    categorization had already finished, even though it doesn't actually
+    need anything JD categorization produces. Splitting it out means a
+    caller can run this CONCURRENTLY with extract_jd_requirements_
+    categorized instead of waiting for it — the two are independent until
+    the actual matching step, which is the only part that genuinely needs
+    both a resume and a specific JD's requirements at once.
+
+    Same race/rotation behavior as extract_jd_requirements_categorized:
+    races Ollama vs Groq when both configured, and on a Groq rate limit,
+    rotates to a different pool key rather than retrying the same one.
+    """
+    def _try_ollama() -> Optional[dict]:
+        ollama_mdl = ollama_model or "llama3"
+        raw = _call_ollama(_build_resume_facts_prompt(resume_text, OLLAMA_DOC_CHARS), ollama_base_url, ollama_mdl)
+        return _build_resume_facts_result(_parse_json_response(raw))
+
+    def _try_groq() -> Optional[dict]:
+        from langchain_groq import ChatGroq
+        from langchain.schema import HumanMessage
+
+        limit = MAX_DOC_CHARS
+        last_error = None
+        for _attempt in range(4):
+            try:
+                llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0, max_tokens=2000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
+                _t0 = time.time()
+                print(f"  TIMING: extract_resume_facts attempting Groq call ({groq_model}, key {_mask_key_for_log(groq_key)})")
+                resp = llm.invoke([HumanMessage(content=_build_resume_facts_prompt(resume_text, limit))])
+                _elapsed = time.time() - _t0
+                print(f"  TIMING: extract_resume_facts Groq call ({groq_model}, key {_mask_key_for_log(groq_key)}) took {_elapsed:.2f}s, prompt size {limit} chars")
+                return _build_resume_facts_result(_parse_json_response(resp.content))
+            except Exception as e:
+                last_error = e
+                if _is_token_limit_error(e):
+                    new_limit = _safe_retry_chars(e, limit)
+                    if new_limit:
+                        limit = new_limit
+                        continue
+                raise
+        if last_error:
+            raise last_error
+        return None
+
+    for _outer_attempt in range(2):
+        attempts = {}
+        if ollama_base_url:
+            attempts["ollama"] = _try_ollama
+        if groq_key:
+            attempts["groq"] = _try_groq
+        if not attempts:
+            break
+        outcome = await _run_in_llm_pool(race_llm_providers, attempts)
+        winner, result, is_rate_limit = outcome["winner"], outcome["result"], outcome["is_rate_limit_failure"]
+
+        if winner:
+            return result
+
+        if is_rate_limit and db is not None and user_id is not None and _outer_attempt == 0:
+            from utils.groq_pool import resolve_groq_key
+            kr = await resolve_groq_key(db, user_id)
+            if kr["groq_key"] and kr["key_preview"] != _mask_key_for_log(groq_key):
+                print(f"  WARNING: extract_resume_facts — key {_mask_key_for_log(groq_key)} was rate-limited, retrying with a different pool key {kr['key_preview']}")
+                groq_key = kr["groq_key"]
+                groq_model = kr["model"] or groq_model
+                continue
+        break
+
+    return None
+
+
+def _build_resume_facts_prompt(resume_text: str, resume_limit: int) -> str:
+    return f"""You are an expert recruiter reading a resume. Extract the following —
+this is about the CANDIDATE only, not tied to any specific job:
+
+RESUME:
+\"\"\"{_truncate_for_llm(resume_text, "resume text", resume_limit)}\"\"\"
+
+Return ONLY valid JSON, no markdown, no commentary:
+{{
+  "technical_skills": ["<candidate's technical/hard skills — tools, languages, platforms>"],
+  "business_skills": ["<business/domain skills — stakeholder management, budgeting, domain expertise, strategy>"],
+  "soft_skills": ["<interpersonal skills evidenced in the resume — leadership, communication, problem solving>"],
+  "significant_experience": ["<notable experience highlights with specifics — seniority, scale, achievements, years>"],
+  "certifications_degrees": ["<certifications and degrees found in the resume>"],
+  "summary": "<2-3 sentence evidence-based overall assessment of the candidate>",
+  "years_experience": <integer, best estimate>,
+  "education": "<highest qualification found, or empty string>"
+}}"""
+
+
+def _build_resume_facts_result(data: dict) -> Optional[dict]:
+    if not data:
+        return None
+    return {
+        "technical_skills": [s for s in data.get("technical_skills", []) if s][:10],
+        "business_skills": [s for s in data.get("business_skills", []) if s][:8],
+        "soft_skills": [s for s in data.get("soft_skills", []) if s][:8],
+        "significant_experience": [s for s in data.get("significant_experience", []) if s][:6],
+        "certifications_degrees": [s for s in data.get("certifications_degrees", []) if s][:8],
+        "summary": (data.get("summary") or "").strip(),
+        "years_experience": int(data.get("years_experience") or 0),
+        "education": _clean_field(data.get("education")),
+        "ai_powered": True,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # CANDIDATE STRENGTHS — categorized breakdown, evidence-based against the JD
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -602,6 +779,7 @@ async def extract_candidate_strengths(
     ollama_base_url: Optional[str] = None, ollama_model: Optional[str] = None,
     known_terms_hint: Optional[List[str]] = None,
     db=None, user_id: Optional[int] = None,
+    pre_extracted_facts: Optional[dict] = None,
 ) -> dict:
     """Returns:
     {"essential_matched": [...], "essential_missing": [...], "good_to_have_matched": [...],
@@ -647,6 +825,15 @@ async def extract_candidate_strengths(
     spreading different USERS' requests across the pool. If db/user_id
     aren't provided, every chunk falls back to the single passed-in
     groq_key exactly as before — fully backward compatible.
+
+    Pass pre_extracted_facts (from extract_resume_facts, called separately
+    and concurrently with JD categorization by the caller) to skip
+    re-extracting technical_skills/business_skills/summary/etc. here —
+    the good-to-have call becomes JUST the good-to-have judgment, a
+    lighter/faster prompt, and the pre-extracted facts are merged into the
+    final result directly. If not provided, this function extracts those
+    facts itself as part of the good-to-have call, exactly as before —
+    fully backward compatible either way.
     """
     essential = [s for s in jd_requirements.get("essential", []) if s][:15]
     good_to_have = [s for s in jd_requirements.get("good_to_have", []) if s][:10]
@@ -666,17 +853,21 @@ async def extract_candidate_strengths(
 
     async def _race_for(build_prompt, parse_result, call_groq_key, call_groq_model):
         """Races Ollama vs Groq (whichever configured) for a single prompt/
-        parse pair, with Groq's 413-retry sequence built in. Returns
-        (result_or_None, groq_was_the_only_attempt: bool, groq_succeeded: bool).
+        parse pair, with Groq's 413-retry sequence built in.
 
-        Takes an ALREADY-RESOLVED key rather than resolving one itself —
-        key resolution is an async DB call, and this function's actual
-        work (the Groq/Ollama race) is dispatched into worker threads
-        alongside OTHER concurrent chunks sharing the same DB session.
-        SQLAlchemy's AsyncSession isn't safe to use concurrently across
-        multiple tasks — so every DB touch for key resolution/reporting
-        happens sequentially in the caller, before/after the concurrent
-        gather, never inside it."""
+        Returns (result_or_None, is_rate_limit_failure: bool).
+
+        Deliberately does NOT touch the database at all — this function
+        runs concurrently with OTHER chunks via asyncio.gather, sharing
+        the same DB session, and SQLAlchemy's AsyncSession isn't safe to
+        use concurrently across tasks. An earlier version of this
+        function tried to rotate to a different pool key internally on a
+        rate limit, which meant committing to the DB from inside the
+        concurrent gather — confirmed directly via a real
+        IllegalStateChangeError in testing. Rotation now happens at the
+        OUTER, sequential level instead (see the retry-round logic below,
+        after this gather completes) — this function just reports
+        whether a rate limit was the cause, so the caller can decide."""
         def _try_ollama() -> Optional[dict]:
             ollama_mdl = ollama_model or "llama3"
             raw = _call_ollama(build_prompt(OLLAMA_DOC_CHARS), ollama_base_url, ollama_mdl)
@@ -704,11 +895,6 @@ async def extract_candidate_strengths(
                         if new_limit:
                             limit = new_limit
                             continue
-                    if _is_rate_limit_error(e) and _attempt < 2:
-                        wait = _parse_retry_after_seconds(e, cap=5.0)
-                        print(f"  WARNING: extract_candidate_strengths chunk hit a rate limit, waiting {wait:.1f}s and retrying this chunk specifically — {str(e)[:150]}")
-                        time.sleep(wait)
-                        continue
                     raise
             if last_error:
                 raise last_error
@@ -720,17 +906,15 @@ async def extract_candidate_strengths(
         if call_groq_key:
             attempts["groq"] = _try_groq
         if not attempts:
-            return None, False, False
+            return None, False
         outcome = await _run_in_llm_pool(race_llm_providers, attempts)
-        groq_was_only_attempt = bool(call_groq_key) and not ollama_base_url
-        groq_succeeded = outcome is not None  # only meaningful when groq_was_only_attempt
-        return (outcome[1] if outcome else None), groq_was_only_attempt, groq_succeeded
+        return outcome["result"], outcome["is_rate_limit_failure"]
 
     async def _verdict_chunk(items: list, call_groq_key, call_groq_model) -> Optional[list]:
         """Returns a list of booleans (one per item, in order), or None on
         total failure for this chunk."""
         if not items:
-            return [], False, False
+            return [], False
         block = "\n".join(f"{i+1}. {r}" for i, r in enumerate(items))
 
         def _build(resume_limit: int) -> str:
@@ -764,8 +948,14 @@ exactly {len(items)} booleans, one per requirement above, IN THE SAME ORDER:
 
     async def _good_to_have_and_skills(call_groq_key, call_groq_model) -> Optional[dict]:
         """One lighter call: good-to-have verdicts (fewer, usually simpler
-        items) plus the resume-level skills/experience/education
-        extraction that doesn't need per-item judgment."""
+        items), plus — ONLY if pre_extracted_facts wasn't already supplied
+        by the caller — the resume-level skills/experience/education
+        extraction that doesn't need per-item judgment. When facts ARE
+        already available (extracted concurrently with JD categorization
+        by the caller, see extract_resume_facts), this becomes JUST the
+        good-to-have judgment: a noticeably lighter, faster prompt, since
+        it no longer needs to also generate 8 extra fields of resume
+        analysis it already has the answer to."""
         good_block = "\n".join(f"{i+1}. {r}" for i, r in enumerate(good_to_have)) or "(none)"
 
         def _build(resume_limit: int) -> str:
@@ -775,6 +965,17 @@ exactly {len(items)} booleans, one per requirement above, IN THE SAME ORDER:
                 f"GOOD-TO-HAVE REQUIREMENTS:\n{good_block}\n\n"
                 if good_to_have else ""
             )
+            if pre_extracted_facts is not None:
+                return f"""You are an expert recruiter reading a resume. {gth_instructions}
+{hint_block}
+
+RESUME:
+\"\"\"{_truncate_for_llm(resume_text, "resume text", resume_limit)}\"\"\"
+
+Return ONLY valid JSON, no markdown, no commentary:
+{{
+  "good_to_have_matched": [true, false]
+}}"""
             return f"""You are an expert recruiter reading a resume. {gth_instructions}
 Also extract the following from the resume itself (not tied to any
 specific requirement):
@@ -803,10 +1004,20 @@ Return ONLY valid JSON, no markdown, no commentary:
 
         return await _race_for(_build, _parse, call_groq_key, call_groq_model)
 
-    # Split essential into small chunks — each one a separate lightweight
-    # request judged concurrently, rather than one large request judging
-    # all of them (see the docstring for why this is the actual fix).
-    ESSENTIAL_CHUNK_SIZE = 8
+    # Chunk size raised from 8 to 15 (matching the essential-items cap)
+    # after direct evidence this session: 3 concurrent chunks each resend
+    # the FULL resume text, and for an account with a tight TPM (tokens
+    # per minute) budget, that redundant volume — not just request count —
+    # was enough to blow through the limit in under a second, on BOTH the
+    # original attempt and the retry. Chunking still helps by running
+    # good-to-have/skills extraction CONCURRENTLY rather than sequentially
+    # bundled with essential judgment, but splitting essential ITSELF into
+    # multiple pieces was adding token volume for comparatively little
+    # latency benefit, at real cost to reliability on tighter accounts.
+    # With this size, a typical (<=15) essential list becomes exactly ONE
+    # chunk rather than 2-3 — cutting concurrent Groq calls for a typical
+    # analysis from 3 down to 2, meaningfully reducing burst token volume.
+    ESSENTIAL_CHUNK_SIZE = 15
     essential_chunks = [
         essential[i:i + ESSENTIAL_CHUNK_SIZE]
         for i in range(0, len(essential), ESSENTIAL_CHUNK_SIZE)
@@ -831,33 +1042,80 @@ Return ONLY valid JSON, no markdown, no commentary:
             resolved_keys.append((groq_key, groq_model, None))
 
     _t0 = time.time()
-    chunk_results = await asyncio.gather(
+    round1_results = await asyncio.gather(
         *[_verdict_chunk(chunk, resolved_keys[i][0], resolved_keys[i][1]) for i, chunk in enumerate(essential_chunks)],
         _good_to_have_and_skills(resolved_keys[-1][0], resolved_keys[-1][1]),
     )
-    print(f"  TIMING: extract_candidate_strengths total (chunked, concurrent) {time.time() - _t0:.2f}s")
+    print(f"  TIMING: extract_candidate_strengths round 1 (chunked, concurrent) {time.time() - _t0:.2f}s")
+
+    final_results = list(round1_results)
+    final_keys_used = [rk[0] for rk in resolved_keys]
+
+    if db is not None and user_id is not None:
+        from utils.groq_pool import record_key_outcome, resolve_groq_key
+
+        # Sequentially report every pool-sourced slot's round-1 outcome —
+        # safe here since the concurrent gather has already completed.
+        for i, (result, _is_rl) in enumerate(round1_results):
+            pool_id = resolved_keys[i][2]
+            if pool_id is not None:
+                await record_key_outcome(db, pool_id, success=(result is not None))
+
+        # Retry, with a FRESH key, any slot that failed specifically due
+        # to a rate limit — the key itself is fine, just temporarily
+        # throttled, and having just marked it cooling down above,
+        # resolve_groq_key will naturally offer a genuinely different key
+        # if the pool has one, rather than the identical key that just
+        # failed. This is the actual fix for a confirmed real bug: a
+        # production log showed the SAME key being retried three times
+        # against the same rate limit, never once trying a different pool
+        # key, even though the whole point of a multi-key pool is to
+        # route around exactly this.
+        retry_assignments = {}
+        for i, (result, is_rl) in enumerate(round1_results):
+            if result is None and is_rl:
+                kr = await resolve_groq_key(db, user_id)
+                if kr["groq_key"] and kr["key_preview"] != _mask_key_for_log(resolved_keys[i][0]):
+                    retry_assignments[i] = kr
+                    print(f"  WARNING: extract_candidate_strengths slot {i} — key {_mask_key_for_log(resolved_keys[i][0])} was rate-limited, retrying with a different pool key {kr['key_preview']} instead of hammering the same one")
+                elif kr["groq_key"]:
+                    print(f"  WARNING: extract_candidate_strengths slot {i} — key {_mask_key_for_log(resolved_keys[i][0])} was rate-limited, but no other key is currently available (pool exhausted or only one key configured) — not retrying")
+
+        if retry_assignments:
+            async def _retry_one(i):
+                kr = retry_assignments[i]
+                key, model = kr["groq_key"], kr["model"] or groq_model
+                if i < len(essential_chunks):
+                    result, is_rl = await _verdict_chunk(essential_chunks[i], key, model)
+                else:
+                    result, is_rl = await _good_to_have_and_skills(key, model)
+                return i, result, is_rl
+
+            _t1 = time.time()
+            retry_outcomes = await asyncio.gather(*[_retry_one(i) for i in retry_assignments])
+            print(f"  TIMING: extract_candidate_strengths retry round (chunked, concurrent) {time.time() - _t1:.2f}s")
+
+            # Sequentially report retry outcomes too — again, safe here
+            # since this retry gather has also already completed.
+            for i, result, _is_rl in retry_outcomes:
+                final_results[i] = (result, _is_rl)
+                kr = retry_assignments[i]
+                final_keys_used[i] = kr["groq_key"]
+                if kr["pool_id"] is not None:
+                    await record_key_outcome(db, kr["pool_id"], success=(result is not None))
 
     # Clear, single-line summary of every DISTINCT key this analysis
-    # actually drew from — since chunking can genuinely span multiple
-    # pool keys, piecing that together from scattered per-chunk log lines
-    # isn't practical. This is the line to look for when you need "which
-    # account(s) served this specific request".
-    distinct_key_previews = sorted(set(_mask_key_for_log(k[0]) for k in resolved_keys if k[0]))
+    # actually drew from — built from the FINAL key each slot actually
+    # used, including any that were rotated to a different key after a
+    # rate limit. Since chunking can genuinely span multiple pool keys,
+    # piecing that together from scattered per-chunk log lines isn't
+    # practical — this is the line to look for when you need "which
+    # account(s) actually served this specific request".
+    distinct_key_previews = sorted(set(_mask_key_for_log(k) for k in final_keys_used if k))
     print(f"  SUMMARY: extract_candidate_strengths used {len(distinct_key_previews)} distinct key(s): {', '.join(distinct_key_previews) if distinct_key_previews else '(none)'}")
 
-    # Now that all concurrent work is done, report each pool key's outcome
-    # sequentially — same reasoning as above, this is a DB write and must
-    # not race with any other DB access on this session.
-    for i, (_, _, pool_id) in enumerate(resolved_keys):
-        if pool_id is None:
-            continue
-        _, groq_was_only_attempt, groq_succeeded = chunk_results[i]
-        if groq_was_only_attempt:
-            from utils.groq_pool import record_key_outcome
-            await record_key_outcome(db, pool_id, success=groq_succeeded)
-
-    essential_chunk_verdicts = [r[0] for r in chunk_results[:-1]]
-    gth_and_skills = chunk_results[-1][0]
+    essential_chunk_verdicts = [r[0] for r in final_results[:-1]]
+    gth_and_skills = final_results[-1][0]
 
     if gth_and_skills is None or any(v is None for v in essential_chunk_verdicts):
         print("  WARNING: extract_candidate_strengths — one or more concurrent chunks failed, falling back to keyword heuristic")
@@ -872,19 +1130,24 @@ Return ONLY valid JSON, no markdown, no commentary:
     gv = gth_and_skills.get("good_to_have_matched") or []
     good_matched = [r for i, r in enumerate(good_to_have) if i < len(gv) and gv[i]]
 
+    # Facts come from pre_extracted_facts if the caller already ran
+    # extract_resume_facts concurrently with JD categorization; otherwise
+    # from this same gth_and_skills call, exactly as before.
+    facts_source = pre_extracted_facts if pre_extracted_facts is not None else gth_and_skills
+
     return {
         "essential_matched": essential_matched[:15],
         "essential_missing": essential_missing[:15],
         "good_to_have_matched": good_matched[:10],
-        "technical_skills": [s for s in gth_and_skills.get("technical_skills", []) if s][:10],
-        "business_skills": [s for s in gth_and_skills.get("business_skills", []) if s][:8],
-        "soft_skills": [s for s in gth_and_skills.get("soft_skills", []) if s][:8],
-        "significant_experience": [s for s in gth_and_skills.get("significant_experience", []) if s][:6],
-        "certifications_degrees": [s for s in gth_and_skills.get("certifications_degrees", []) if s][:8],
+        "technical_skills": [s for s in facts_source.get("technical_skills", []) if s][:10],
+        "business_skills": [s for s in facts_source.get("business_skills", []) if s][:8],
+        "soft_skills": [s for s in facts_source.get("soft_skills", []) if s][:8],
+        "significant_experience": [s for s in facts_source.get("significant_experience", []) if s][:6],
+        "certifications_degrees": [s for s in facts_source.get("certifications_degrees", []) if s][:8],
         "gaps": essential_missing[:10],
-        "summary": (gth_and_skills.get("summary") or "").strip(),
-        "years_experience": int(gth_and_skills.get("years_experience") or 0),
-        "education": _clean_field(gth_and_skills.get("education")),
+        "summary": (facts_source.get("summary") or "").strip(),
+        "years_experience": int(facts_source.get("years_experience") or 0),
+        "education": _clean_field(facts_source.get("education")),
         "ai_powered": True,
         "_groqKeyPreviews": distinct_key_previews,
     }

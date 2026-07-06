@@ -6,6 +6,7 @@ Supports PDF, DOCX, TXT for both resume and job description.
 import io
 import re
 import json
+import asyncio
 from typing import Optional
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
@@ -391,19 +392,66 @@ async def _score_resume(
     ollama_base_url: Optional[str] = None, ollama_model: Optional[str] = None, db=None, user_id: Optional[int] = None,
 ) -> dict:
     from utils.llm_extraction import (
-        extract_jd_requirements_categorized, extract_candidate_strengths,
+        extract_jd_requirements_categorized, extract_candidate_strengths, extract_resume_facts,
         get_taxonomy_hint, enrich_skill_taxonomy,
     )
 
     known_terms = await get_taxonomy_hint(db) if db is not None else []
-    jd_req = await extract_jd_requirements_categorized(
-        jd, groq_key, groq_model, ollama_base_url, ollama_model, known_terms,
-        db=db, user_id=user_id,
+
+    # JD categorization and resume-facts extraction are genuinely
+    # independent of each other — the JD's requirements don't depend on
+    # the resume, and the resume's skills/experience/education don't
+    # depend on the JD. Only the actual MATCHING step below needs both.
+    # Running these two concurrently (rather than one after the other,
+    # which is what happened before) is a real, correct optimization, not
+    # just chunking for its own sake — confirmed directly in production
+    # logs that each one alone typically takes ~3 seconds, so running
+    # them together rather than back-to-back saves roughly that much.
+    #
+    # Keys are resolved SEQUENTIALLY here, before any concurrent work
+    # starts — resolving both from inside the concurrent gather would mean
+    # two DB writes racing on the same session, which SQLAlchemy's
+    # AsyncSession doesn't allow (confirmed the hard way earlier this
+    # session with a real IllegalStateChangeError).
+    if db is not None and user_id is not None:
+        from utils.groq_pool import resolve_groq_key
+        kr_jd = await resolve_groq_key(db, user_id)
+        kr_resume = await resolve_groq_key(db, user_id)
+        jd_key, jd_model = kr_jd["groq_key"], kr_jd["model"] or groq_model
+        resume_key, resume_model = kr_resume["groq_key"], kr_resume["model"] or groq_model
+    else:
+        jd_key, jd_model = groq_key, groq_model
+        resume_key, resume_model = groq_key, groq_model
+
+    jd_req, resume_facts = await asyncio.gather(
+        extract_jd_requirements_categorized(jd, jd_key, jd_model, ollama_base_url, ollama_model, known_terms),
+        extract_resume_facts(resume, resume_key, resume_model, ollama_base_url, ollama_model),
     )
+    # If the concurrent resume-facts call didn't succeed for any reason,
+    # don't pass a None down as if it were real data — just omit it, and
+    # extract_candidate_strengths falls back to extracting facts itself
+    # as part of the matching call, exactly as it did before this change.
+    from utils.llm_extraction import _mask_key_for_log
+    resume_facts_preview = _mask_key_for_log(resume_key) if resume_facts else None
+
     strengths = await extract_candidate_strengths(
         resume, jd_req, groq_key, groq_model, ollama_base_url, ollama_model, known_terms,
         db=db, user_id=user_id,
+        pre_extracted_facts=resume_facts if resume_facts else None,
     )
+    # Single, easy-to-find summary line combining every key touched across
+    # THIS ENTIRE analysis (JD categorization + resume-facts extraction +
+    # all candidate-strengths chunks) — the line to grep for when a
+    # request could plausibly have spanned multiple pool keys and you need
+    # the full picture in one place rather than piecing it together from
+    # several scattered lines.
+    all_key_previews = sorted(set(
+        ([jd_req["_groqKeyPreview"]] if jd_req.get("_groqKeyPreview") else [])
+        + ([resume_facts_preview] if resume_facts_preview else [])
+        + (strengths.get("_groqKeyPreviews") or [])
+    ))
+    print(f"  SUMMARY: CVAnalysis request used {len(all_key_previews)} distinct Groq key(s) overall: {', '.join(all_key_previews) if all_key_previews else '(none — fell back to keyword matching)'}")
+
     if db is not None and strengths.get("ai_powered"):
         await enrich_skill_taxonomy(db, {
             "essential": jd_req.get("essential", []),
@@ -470,7 +518,7 @@ async def _score_resume(
         "missingSkills": missing[:15],
         "aiPowered": ai_powered,
         "groqModel": groq_model if ai_powered else None,
-        "groqKeyPreview": jd_req.get("_groqKeyPreview") if ai_powered else None,
+        "groqKeyPreview": ", ".join(all_key_previews) if (ai_powered and all_key_previews) else None,
         # ── Categorized strengths — the actual point of this round's change ──
         "strengthsBreakdown": {
             "essentialMatched": strengths.get("essential_matched", []),

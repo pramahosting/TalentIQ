@@ -80,6 +80,7 @@ async def resolve_groq_key(db: AsyncSession, user_id: int) -> dict:
             UserAPIKey.user_id == user_id,
             UserAPIKey.service == "groq",
             UserAPIKey.key_name == "api_key",
+            UserAPIKey.is_global.isnot(True),
         )
     )
     personal_key = r.scalar_one_or_none()
