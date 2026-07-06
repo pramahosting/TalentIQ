@@ -22,6 +22,7 @@ interface AnalysisResult {
   missingSkills: string[];
   aiPowered?: boolean;
   groqModel?: string | null;
+  groqKeyPreview?: string | null;
   note?: string;
   aiError?: string;
   strengthsBreakdown?: {
@@ -451,7 +452,7 @@ export default function CVAnalysisPage() {
         <div>
           {isAdmin && (result.aiPowered ? (
             <div className="tiq-alert tiq-alert-success tiq-mb-4" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <Sparkles size={14} /> AI-powered analysis by Groq LLM{result.groqModel ? ` (${result.groqModel})` : ""}
+              <Sparkles size={14} /> AI-powered analysis by Groq LLM{result.groqModel ? ` (${result.groqModel})` : ""}{result.groqKeyPreview ? ` — key ${result.groqKeyPreview}` : ""}
             </div>
           ) : (
             <div className="tiq-alert tiq-mb-4" style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.3)", color: "#ef4444" }}>
