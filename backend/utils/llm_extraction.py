@@ -135,6 +135,40 @@ def _is_token_limit_error(e: Exception) -> bool:
     return "413" in msg or "too large" in msg or "tokens per minute" in msg or " tpm" in msg
 
 
+def _is_rate_limit_error(e: Exception) -> bool:
+    """Detects a 429 'too many requests right now' error specifically —
+    unlike a 413 (this exact request is too big, will never succeed
+    without shrinking it), a 429 is transient: the SAME request will very
+    likely succeed if retried after the rate-limit window passes. This
+    matters a lot with the chunked/concurrent architecture used below —
+    firing several concurrent Groq requests for one analysis measurably
+    increases the odds that one of them lands during a moment the
+    account's shared (organization-wide, not per-key) rate limit is
+    briefly exhausted, even when the account has plenty of headroom
+    overall. Previously, ANY single chunk hitting this meant the whole
+    analysis fell back to the weak keyword heuristic — losing real,
+    already-succeeded AI results from the other chunks over one transient
+    blip. Retrying just the affected chunk fixes that."""
+    msg = str(e).lower()
+    return "429" in msg or "rate limit reached" in msg or "rate_limit_exceeded" in msg
+
+
+def _parse_retry_after_seconds(e: Exception, cap: float = 5.0) -> float:
+    """Groq's 429 error message often includes a suggested wait, e.g.
+    "Please try again in 6m11.52s" — parsed here so the retry waits a
+    sensible amount rather than guessing. Genuine exhaustion can suggest
+    minutes-long waits, which is far too long to make a user wait
+    synchronously for one request — capped at `cap` seconds; if the
+    suggested wait exceeds that, the caller should treat this as not
+    worth retrying right now rather than blocking the user for minutes."""
+    m = re.search(r"try again in\s+(?:(\d+)m)?([\d.]+)s", str(e), re.IGNORECASE)
+    if not m:
+        return min(1.0, cap)  # no hint available — a short default wait
+    minutes = int(m.group(1)) if m.group(1) else 0
+    seconds = float(m.group(2))
+    return min(minutes * 60 + seconds, cap)
+
+
 def _safe_retry_chars(e: Exception, current_chars: int) -> Optional[int]:
     """Groq's 413 error message states the exact limit and how much was
     requested (e.g. "Limit 6000, Requested 7347"). Rather than blindly
@@ -365,6 +399,7 @@ async def extract_jd_requirements_categorized(
     jd_text: str, groq_key: Optional[str], groq_model: str,
     ollama_base_url: Optional[str] = None, ollama_model: Optional[str] = None,
     known_terms_hint: Optional[List[str]] = None,
+    db=None, user_id: Optional[int] = None,
 ) -> dict:
     """Returns:
     {"role": str, "location": str, "company": str,
@@ -476,10 +511,27 @@ Return ONLY valid JSON, no markdown, no commentary:
                         print(f"  WARNING: extract_jd_requirements_categorized request too large at {jd_limit}-char JD budget, retrying at computed safe size {new_limit} — {str(e)[:150]}")
                         jd_limit = new_limit
                         continue
+                if _is_rate_limit_error(e) and _attempt < 2:
+                    wait = _parse_retry_after_seconds(e, cap=5.0)
+                    print(f"  WARNING: extract_jd_requirements_categorized hit a rate limit, waiting {wait:.1f}s and retrying (this is transient, not a request-size problem) — {str(e)[:150]}")
+                    time.sleep(wait)
+                    continue
                 raise
         if last_error:
             raise last_error
         return None
+
+    # If db/user_id are available, resolve from the shared pool instead of
+    # using the passed-in groq_key directly — reassigning these local
+    # names works because _try_groq/_try_ollama above close over them by
+    # name, evaluated when actually called, not when defined.
+    _pool_id = None
+    if db is not None and user_id is not None:
+        from utils.groq_pool import resolve_groq_key
+        _kr = await resolve_groq_key(db, user_id)
+        groq_key = _kr["groq_key"]
+        groq_model = _kr["model"] or groq_model
+        _pool_id = _kr["pool_id"] if _kr["source"] == "pool" else None
 
     # ── Race Ollama and Groq concurrently — total latency is bounded by
     # whichever is faster, not the sum of a failed attempt plus the other.
@@ -492,6 +544,9 @@ Return ONLY valid JSON, no markdown, no commentary:
         _race_t0 = time.time()
         outcome = await _run_in_llm_pool(race_llm_providers, attempts)
         _race_elapsed = time.time() - _race_t0
+        if _pool_id is not None and not ollama_base_url:
+            from utils.groq_pool import record_key_outcome
+            await record_key_outcome(db, _pool_id, success=outcome is not None)
         if outcome:
             winner, result = outcome
             print(f"  TIMING: extract_jd_requirements_categorized total {_race_elapsed:.2f}s, winner: {winner}")
@@ -533,6 +588,7 @@ async def extract_candidate_strengths(
     resume_text: str, jd_requirements: dict, groq_key: Optional[str], groq_model: str,
     ollama_base_url: Optional[str] = None, ollama_model: Optional[str] = None,
     known_terms_hint: Optional[List[str]] = None,
+    db=None, user_id: Optional[int] = None,
 ) -> dict:
     """Returns:
     {"essential_matched": [...], "essential_missing": [...], "good_to_have_matched": [...],
@@ -569,6 +625,15 @@ async def extract_candidate_strengths(
     Falls to the deterministic heuristic only if the whole thing fails.
     known_terms_hint (from the accumulated skill taxonomy) nudges
     categorization toward terminology already seen before.
+
+    Pass db + user_id to have EACH concurrent chunk independently draw its
+    own key from the shared Groq key pool (see utils/groq_pool.py) rather
+    than all chunks sharing the single `groq_key` passed in — this is what
+    lets one user's single request use multiple pool keys simultaneously,
+    for genuinely more combined throughput on a large analysis, not just
+    spreading different USERS' requests across the pool. If db/user_id
+    aren't provided, every chunk falls back to the single passed-in
+    groq_key exactly as before — fully backward compatible.
     """
     essential = [s for s in jd_requirements.get("essential", []) if s][:15]
     good_to_have = [s for s in jd_requirements.get("good_to_have", []) if s][:10]
@@ -586,10 +651,19 @@ async def extract_candidate_strengths(
             + ", ".join(known_terms_hint[:30])
         )
 
-    async def _race_for(build_prompt, parse_result):
+    async def _race_for(build_prompt, parse_result, call_groq_key, call_groq_model):
         """Races Ollama vs Groq (whichever configured) for a single prompt/
-        parse pair, with Groq's 413-retry sequence built in. Returns the
-        parsed result dict, or None if every configured provider failed."""
+        parse pair, with Groq's 413-retry sequence built in. Returns
+        (result_or_None, groq_was_the_only_attempt: bool, groq_succeeded: bool).
+
+        Takes an ALREADY-RESOLVED key rather than resolving one itself —
+        key resolution is an async DB call, and this function's actual
+        work (the Groq/Ollama race) is dispatched into worker threads
+        alongside OTHER concurrent chunks sharing the same DB session.
+        SQLAlchemy's AsyncSession isn't safe to use concurrently across
+        multiple tasks — so every DB touch for key resolution/reporting
+        happens sequentially in the caller, before/after the concurrent
+        gather, never inside it."""
         def _try_ollama() -> Optional[dict]:
             ollama_mdl = ollama_model or "llama3"
             raw = _call_ollama(build_prompt(OLLAMA_DOC_CHARS), ollama_base_url, ollama_mdl)
@@ -603,11 +677,11 @@ async def extract_candidate_strengths(
             last_error = None
             for _attempt in range(4):
                 try:
-                    llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0, max_tokens=2000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
+                    llm = ChatGroq(api_key=call_groq_key, model=call_groq_model, temperature=0, max_tokens=2000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
                     _t0 = time.time()
                     resp = llm.invoke([HumanMessage(content=build_prompt(limit))])
                     _elapsed = time.time() - _t0
-                    print(f"  TIMING: extract_candidate_strengths chunk Groq call ({groq_model}) took {_elapsed:.2f}s, prompt size {limit} chars")
+                    print(f"  TIMING: extract_candidate_strengths chunk Groq call ({call_groq_model}) took {_elapsed:.2f}s, prompt size {limit} chars")
                     return parse_result(_parse_json_response(resp.content))
                 except Exception as e:
                     last_error = e
@@ -616,6 +690,11 @@ async def extract_candidate_strengths(
                         if new_limit:
                             limit = new_limit
                             continue
+                    if _is_rate_limit_error(e) and _attempt < 2:
+                        wait = _parse_retry_after_seconds(e, cap=5.0)
+                        print(f"  WARNING: extract_candidate_strengths chunk hit a rate limit, waiting {wait:.1f}s and retrying this chunk specifically — {str(e)[:150]}")
+                        time.sleep(wait)
+                        continue
                     raise
             if last_error:
                 raise last_error
@@ -624,18 +703,20 @@ async def extract_candidate_strengths(
         attempts = {}
         if ollama_base_url:
             attempts["ollama"] = _try_ollama
-        if groq_key:
+        if call_groq_key:
             attempts["groq"] = _try_groq
         if not attempts:
-            return None
+            return None, False, False
         outcome = await _run_in_llm_pool(race_llm_providers, attempts)
-        return outcome[1] if outcome else None
+        groq_was_only_attempt = bool(call_groq_key) and not ollama_base_url
+        groq_succeeded = outcome is not None  # only meaningful when groq_was_only_attempt
+        return (outcome[1] if outcome else None), groq_was_only_attempt, groq_succeeded
 
-    async def _verdict_chunk(items: list) -> Optional[list]:
+    async def _verdict_chunk(items: list, call_groq_key, call_groq_model) -> Optional[list]:
         """Returns a list of booleans (one per item, in order), or None on
         total failure for this chunk."""
         if not items:
-            return []
+            return [], False, False
         block = "\n".join(f"{i+1}. {r}" for i, r in enumerate(items))
 
         def _build(resume_limit: int) -> str:
@@ -665,9 +746,9 @@ exactly {len(items)} booleans, one per requirement above, IN THE SAME ORDER:
             v = data.get("matched") or []
             return [bool(v[i]) if i < len(v) else False for i in range(len(items))]
 
-        return await _race_for(_build, _parse)
+        return await _race_for(_build, _parse, call_groq_key, call_groq_model)
 
-    async def _good_to_have_and_skills() -> Optional[dict]:
+    async def _good_to_have_and_skills(call_groq_key, call_groq_model) -> Optional[dict]:
         """One lighter call: good-to-have verdicts (fewer, usually simpler
         items) plus the resume-level skills/experience/education
         extraction that doesn't need per-item judgment."""
@@ -706,7 +787,7 @@ Return ONLY valid JSON, no markdown, no commentary:
                 return None
             return data
 
-        return await _race_for(_build, _parse)
+        return await _race_for(_build, _parse, call_groq_key, call_groq_model)
 
     # Split essential into small chunks — each one a separate lightweight
     # request judged concurrently, rather than one large request judging
@@ -717,15 +798,44 @@ Return ONLY valid JSON, no markdown, no commentary:
         for i in range(0, len(essential), ESSENTIAL_CHUNK_SIZE)
     ] or [[]]
 
+    # Resolve a key for each concurrent piece of work SEQUENTIALLY, before
+    # any of the actual (slow) LLM calls are dispatched — key resolution
+    # is a DB read/write, and SQLAlchemy's AsyncSession isn't safe to use
+    # concurrently across multiple tasks sharing the same session. Doing
+    # every DB touch up front, one at a time, then running only the LLM
+    # calls themselves concurrently, avoids that entirely while still
+    # letting each chunk draw a DIFFERENT pool key for real parallel
+    # throughput on a single request.
+    num_slots = len(essential_chunks) + 1  # + 1 for the good-to-have/skills call
+    resolved_keys: list = []
+    for _ in range(num_slots):
+        if db is not None and user_id is not None:
+            from utils.groq_pool import resolve_groq_key
+            kr = await resolve_groq_key(db, user_id)
+            resolved_keys.append((kr["groq_key"], kr["model"] or groq_model, kr["pool_id"] if kr["source"] == "pool" else None))
+        else:
+            resolved_keys.append((groq_key, groq_model, None))
+
     _t0 = time.time()
     chunk_results = await asyncio.gather(
-        *[_verdict_chunk(chunk) for chunk in essential_chunks],
-        _good_to_have_and_skills(),
+        *[_verdict_chunk(chunk, resolved_keys[i][0], resolved_keys[i][1]) for i, chunk in enumerate(essential_chunks)],
+        _good_to_have_and_skills(resolved_keys[-1][0], resolved_keys[-1][1]),
     )
     print(f"  TIMING: extract_candidate_strengths total (chunked, concurrent) {time.time() - _t0:.2f}s")
 
-    essential_chunk_verdicts = chunk_results[:-1]
-    gth_and_skills = chunk_results[-1]
+    # Now that all concurrent work is done, report each pool key's outcome
+    # sequentially — same reasoning as above, this is a DB write and must
+    # not race with any other DB access on this session.
+    for i, (_, _, pool_id) in enumerate(resolved_keys):
+        if pool_id is None:
+            continue
+        _, groq_was_only_attempt, groq_succeeded = chunk_results[i]
+        if groq_was_only_attempt:
+            from utils.groq_pool import record_key_outcome
+            await record_key_outcome(db, pool_id, success=groq_succeeded)
+
+    essential_chunk_verdicts = [r[0] for r in chunk_results[:-1]]
+    gth_and_skills = chunk_results[-1][0]
 
     if gth_and_skills is None or any(v is None for v in essential_chunk_verdicts):
         print("  WARNING: extract_candidate_strengths — one or more concurrent chunks failed, falling back to keyword heuristic")
