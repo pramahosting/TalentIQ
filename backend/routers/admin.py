@@ -260,3 +260,170 @@ async def run_query(
         return {"columns": cols, "rows": rows, "count": len(rows)}
     except Exception as e:
         raise HTTPException(400, str(e))
+
+
+# ── GROQ KEY POOL ────────────────────────────────────────────────────
+# A dedicated, friendlier interface for managing the shared Groq key pool
+# (see utils/groq_pool.py) — the same table (tiq_groq_key_pool) is also
+# reachable through the generic File Manager, but a purpose-built list/
+# add/remove UI beats hand-editing raw rows for something admins will do
+# repeatedly. Admin-only: this is a platform-wide shared resource, same
+# security tier as the existing global Groq/Ollama/Adzuna keys.
+
+class GroqPoolKeyIn(BaseModel):
+    key_value: str
+    model: Optional[str] = None
+
+class GroqPoolKeyOut(BaseModel):
+    id: int
+    key_preview: str   # never the real key — last 4 chars only, enough to tell entries apart
+    model: Optional[str] = None
+    is_active: bool
+    consecutive_errors: int
+    cooldown_until: Optional[str] = None
+    last_used_at: Optional[str] = None
+    added_at: Optional[str] = None
+
+
+def _mask_key(key_value: str) -> str:
+    if not key_value:
+        return ""
+    tail = key_value[-4:] if len(key_value) >= 4 else key_value
+    return f"...{tail}"
+
+
+class GroqModelsQuery(BaseModel):
+    key_value: str
+
+
+@router.post("/groq-pool/models")
+async def list_groq_models_for_key(
+    payload: GroqModelsQuery,
+    _: User = Depends(require_admin),
+):
+    """Fetches the REAL, current list of models available to a Groq key,
+    directly from Groq's own API (OpenAI-compatible /models endpoint) —
+    rather than a hardcoded list in our own code, which is exactly the
+    kind of thing that goes stale the moment Groq adds or retires a
+    model (we hit this directly, twice, earlier this session). Also
+    doubles as a quick validity check for a key before it's added to the
+    pool — an invalid/revoked key will fail here with a clear reason
+    instead of silently sitting in the pool until it's actually used."""
+    import requests as _requests
+    key_value = payload.key_value.strip()
+    if not key_value:
+        raise HTTPException(400, "API key value is required.")
+    try:
+        resp = _requests.get(
+            "https://api.groq.com/openai/v1/models",
+            headers={"Authorization": f"Bearer {key_value}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        models = sorted(
+            [m["id"] for m in data.get("data", []) if m.get("id")],
+        )
+        return {"models": models}
+    except _requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else 0
+        if status == 401:
+            raise HTTPException(400, "This key was rejected by Groq — check it's correct and active.")
+        raise HTTPException(400, f"Groq returned an error (status {status}) when listing models for this key.")
+    except Exception as e:
+        raise HTTPException(400, f"Could not reach Groq to list models: {type(e).__name__}")
+
+
+@router.get("/groq-pool", response_model=List[GroqPoolKeyOut])
+async def list_groq_pool(
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from models.models import GroqKeyPool
+    result = await db.execute(select(GroqKeyPool).order_by(GroqKeyPool.added_at.desc()))
+    entries = result.scalars().all()
+    return [
+        GroqPoolKeyOut(
+            id=e.id, key_preview=_mask_key(e.key_value), model=e.model,
+            is_active=e.is_active, consecutive_errors=e.consecutive_errors,
+            cooldown_until=e.cooldown_until.isoformat() if e.cooldown_until else None,
+            last_used_at=e.last_used_at.isoformat() if e.last_used_at else None,
+            added_at=e.added_at.isoformat() if e.added_at else None,
+        )
+        for e in entries
+    ]
+
+
+@router.post("/groq-pool", response_model=GroqPoolKeyOut, status_code=201)
+async def add_groq_pool_key(
+    payload: GroqPoolKeyIn,
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from models.models import GroqKeyPool
+    key_value = payload.key_value.strip()
+    if not key_value:
+        raise HTTPException(400, "API key value is required.")
+
+    existing = (await db.execute(select(GroqKeyPool).where(GroqKeyPool.key_value == key_value))).scalar_one_or_none()
+    if existing:
+        raise HTTPException(409, "This exact key is already in the pool.")
+
+    entry = GroqKeyPool(key_value=key_value, model=(payload.model or "").strip() or None, is_active=True)
+    db.add(entry)
+    await db.flush()
+    return GroqPoolKeyOut(
+        id=entry.id, key_preview=_mask_key(entry.key_value), model=entry.model,
+        is_active=entry.is_active, consecutive_errors=entry.consecutive_errors,
+        cooldown_until=None, last_used_at=None,
+        added_at=entry.added_at.isoformat() if entry.added_at else None,
+    )
+
+
+class GroqPoolKeyPatch(BaseModel):
+    is_active: Optional[bool] = None
+    model: Optional[str] = None
+
+
+@router.patch("/groq-pool/{pool_id}", response_model=GroqPoolKeyOut)
+async def update_groq_pool_key(
+    pool_id: int,
+    payload: GroqPoolKeyPatch,
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from models.models import GroqKeyPool
+    entry = await db.get(GroqKeyPool, pool_id)
+    if not entry:
+        raise HTTPException(404, "Pool key not found.")
+    if payload.is_active is not None:
+        entry.is_active = payload.is_active
+    if payload.model is not None:
+        entry.model = payload.model.strip() or None
+    # Reactivating a key clears any lingering cooldown/error streak — an
+    # admin flipping it back on is a deliberate "trust this again" signal.
+    if payload.is_active is True:
+        entry.consecutive_errors = 0
+        entry.cooldown_until = None
+    await db.flush()
+    return GroqPoolKeyOut(
+        id=entry.id, key_preview=_mask_key(entry.key_value), model=entry.model,
+        is_active=entry.is_active, consecutive_errors=entry.consecutive_errors,
+        cooldown_until=entry.cooldown_until.isoformat() if entry.cooldown_until else None,
+        last_used_at=entry.last_used_at.isoformat() if entry.last_used_at else None,
+        added_at=entry.added_at.isoformat() if entry.added_at else None,
+    )
+
+
+@router.delete("/groq-pool/{pool_id}")
+async def delete_groq_pool_key(
+    pool_id: int,
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from models.models import GroqKeyPool
+    entry = await db.get(GroqKeyPool, pool_id)
+    if not entry:
+        raise HTTPException(404, "Pool key not found.")
+    await db.delete(entry)
+    return {"message": "Deleted"}

@@ -6,7 +6,7 @@ All tables prefixed tiq_ to coexist with AccFino on the same Neon database.
 from datetime import datetime
 from sqlalchemy import (
     Column, Integer, String, Text, Float, Boolean,
-    DateTime, ForeignKey, JSON, LargeBinary, UniqueConstraint,
+    DateTime, Date, ForeignKey, JSON, LargeBinary, UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 
@@ -602,3 +602,41 @@ class JDVendorLink(Base):
     jd_id          = Column(Integer, ForeignKey("tiq_jd_records.id"), nullable=False, index=True)
     vendor_id      = Column(Integer, ForeignKey("tiq_vendors.id"), nullable=False, index=True)
     first_linked_at = Column(DateTime, default=datetime.utcnow)
+
+
+class GroqKeyPool(Base):
+    """A pool of shared/global Groq API keys, load-balanced automatically
+    based on real-time health rather than a fixed per-user quota.
+
+    Why this exists: Groq's rate limits are per API key, not per user of
+    this platform. With only ONE shared key, heavy usage from even a
+    single account can exhaust its rate limit for every other user relying
+    on that same fallback -- the exact 429/413 storm diagnosed the hard way
+    earlier this session. A hard per-user quota "solves" that by blocking
+    users, but that doesn't scale UP with demand, it just rations a fixed
+    ceiling more fairly. This does the opposite: capacity grows simply by
+    an admin adding another Groq key to the pool (any tier, even multiple
+    free-tier keys), and the system automatically spreads load across
+    whichever keys are currently healthy -- no user is ever blocked because
+    of another user's usage, and adding capacity is a one-row insert, not
+    a code change.
+
+    Health tracking is DB-backed (not in-process memory) specifically so
+    it stays correct if this app ever runs as multiple replicas behind a
+    load balancer -- an in-memory-only tracker would let each replica
+    independently keep hammering a key the OTHER replicas already know is
+    rate-limited.
+
+    Managed via the existing generic admin table editor (Settings -> File
+    Manager -> tiq_groq_key_pool) -- no dedicated UI needed; adding a row
+    IS adding capacity."""
+    __tablename__ = "tiq_groq_key_pool"
+
+    id                 = Column(Integer, primary_key=True, index=True)
+    key_value          = Column(Text, nullable=False, unique=True)
+    model              = Column(String(200), nullable=True)  # per-key model override; falls back to the account's configured model if empty
+    is_active          = Column(Boolean, default=True, nullable=False)  # admin can disable a key (e.g. suspected revoked) without deleting it
+    consecutive_errors = Column(Integer, default=0, nullable=False)
+    cooldown_until     = Column(DateTime, nullable=True)  # if set and in the future, this key is skipped until then
+    last_used_at       = Column(DateTime, nullable=True)
+    added_at           = Column(DateTime, default=datetime.utcnow)

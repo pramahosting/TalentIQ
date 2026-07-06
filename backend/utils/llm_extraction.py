@@ -38,6 +38,17 @@ import asyncio
 import concurrent.futures
 from typing import List, Optional
 
+
+def _mask_key_for_log(key_value: Optional[str]) -> str:
+    """Masked identifier (last 4 chars) for log lines — lets a specific
+    request be traced back to which key served it, without ever printing
+    the real value. Same masking convention as utils/groq_pool.py and the
+    admin pool UI."""
+    if not key_value:
+        return "(none)"
+    tail = key_value[-4:] if len(key_value) >= 4 else key_value
+    return f"...{tail}"
+
 # asyncio.to_thread() uses Python's DEFAULT executor, sized at
 # min(32, cpu_count + 4) — on a modest 1-2 vCPU cloud instance, that's
 # only 5-6 worker threads for the ENTIRE application, not just LLM calls.
@@ -470,6 +481,7 @@ Return ONLY valid JSON, no markdown, no commentary:
                 "min_years_experience": int(data.get("min_years_experience") or 0),
                 "education_requirement": _clean_field(data.get("education_requirement")),
                 "ai_powered": True,
+                "_groqKeyPreview": _mask_key_for_log(groq_key),
             }
         return None
 
@@ -499,9 +511,10 @@ Return ONLY valid JSON, no markdown, no commentary:
             try:
                 llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
                 _t0 = time.time()
+                print(f"  TIMING: extract_jd_requirements_categorized attempting Groq call ({groq_model}, key {_mask_key_for_log(groq_key)})")
                 resp = llm.invoke([HumanMessage(content=_build_prompt(jd_limit))])
                 _elapsed = time.time() - _t0
-                print(f"  TIMING: extract_jd_requirements_categorized Groq call ({groq_model}) took {_elapsed:.2f}s, prompt size {jd_limit} chars")
+                print(f"  TIMING: extract_jd_requirements_categorized Groq call ({groq_model}, key {_mask_key_for_log(groq_key)}) took {_elapsed:.2f}s, prompt size {jd_limit} chars")
                 return _build_result(_parse_json_response(resp.content))
             except Exception as e:
                 last_error = e
@@ -679,9 +692,10 @@ async def extract_candidate_strengths(
                 try:
                     llm = ChatGroq(api_key=call_groq_key, model=call_groq_model, temperature=0, max_tokens=2000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
                     _t0 = time.time()
+                    print(f"  TIMING: extract_candidate_strengths chunk attempting Groq call ({call_groq_model}, key {_mask_key_for_log(call_groq_key)})")
                     resp = llm.invoke([HumanMessage(content=build_prompt(limit))])
                     _elapsed = time.time() - _t0
-                    print(f"  TIMING: extract_candidate_strengths chunk Groq call ({call_groq_model}) took {_elapsed:.2f}s, prompt size {limit} chars")
+                    print(f"  TIMING: extract_candidate_strengths chunk Groq call ({call_groq_model}, key {_mask_key_for_log(call_groq_key)}) took {_elapsed:.2f}s, prompt size {limit} chars")
                     return parse_result(_parse_json_response(resp.content))
                 except Exception as e:
                     last_error = e

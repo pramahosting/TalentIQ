@@ -313,7 +313,9 @@ async def match_resume(
     if not jobs:
         raise HTTPException(status_code=404, detail="No jobs found for this search")
 
-    groq_key = await _get_user_api_key(current_user.id, "groq", "api_key", db)
+    from utils.groq_pool import resolve_groq_key
+    key_resolution = await resolve_groq_key(db, current_user.id)
+    groq_key = key_resolution["groq_key"]
     groq_model = await get_groq_model(db, current_user.id)
     ollama_creds = await get_all_credentials(db, current_user.id, "ollama") if ollama_enabled() else {}
     ollama_base_url = ollama_creds.get("base_url")
@@ -326,6 +328,7 @@ async def match_resume(
     candidate_profile = await extract_candidate_profile(resume.raw_text or "", groq_key, groq_model)
 
     match_objs = []
+    match_ai_powered_flags = []
     for job in jobs:
         job_dict = {
             "title": job.title,
@@ -338,6 +341,7 @@ async def match_resume(
             ollama_base_url=ollama_base_url, ollama_model=ollama_model,
             known_terms_hint=known_terms, db=db,
         )
+        match_ai_powered_flags.append(bool(match_data.get("ai_powered")))
         cover = generate_cover_letter(
             resume.raw_text or "", resume.parsed_data or {}, job_dict, groq_key, groq_model
         )
@@ -358,6 +362,10 @@ async def match_resume(
         match_objs.append((match_obj, job))
 
     await db.commit()
+
+    if groq_key and key_resolution["source"] == "pool":
+        from utils.groq_pool import record_key_outcome
+        await record_key_outcome(db, key_resolution["pool_id"], success=any(match_ai_powered_flags) if match_ai_powered_flags else False)
 
     return [
         JobMatchOut(

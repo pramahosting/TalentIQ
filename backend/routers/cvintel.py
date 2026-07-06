@@ -388,7 +388,7 @@ def _compute_weighted_score(jd_req: dict, strengths: dict, resume: str) -> dict:
 
 async def _score_resume(
     resume: str, jd: str, groq_key: Optional[str], groq_model: str = DEFAULT_GROQ_MODEL,
-    ollama_base_url: Optional[str] = None, ollama_model: Optional[str] = None, db=None,
+    ollama_base_url: Optional[str] = None, ollama_model: Optional[str] = None, db=None, user_id: Optional[int] = None,
 ) -> dict:
     from utils.llm_extraction import (
         extract_jd_requirements_categorized, extract_candidate_strengths,
@@ -398,9 +398,11 @@ async def _score_resume(
     known_terms = await get_taxonomy_hint(db) if db is not None else []
     jd_req = await extract_jd_requirements_categorized(
         jd, groq_key, groq_model, ollama_base_url, ollama_model, known_terms,
+        db=db, user_id=user_id,
     )
     strengths = await extract_candidate_strengths(
         resume, jd_req, groq_key, groq_model, ollama_base_url, ollama_model, known_terms,
+        db=db, user_id=user_id,
     )
     if db is not None and strengths.get("ai_powered"):
         await enrich_skill_taxonomy(db, {
@@ -468,6 +470,7 @@ async def _score_resume(
         "missingSkills": missing[:15],
         "aiPowered": ai_powered,
         "groqModel": groq_model if ai_powered else None,
+        "groqKeyPreview": jd_req.get("_groqKeyPreview") if ai_powered else None,
         # ── Categorized strengths — the actual point of this round's change ──
         "strengthsBreakdown": {
             "essentialMatched": strengths.get("essential_matched", []),
@@ -541,6 +544,11 @@ async def analyze_resume(
         raise HTTPException(400, "Job description is required. Upload a file or paste the text.")
 
     # ── Score (structured JD/requirement extraction + deterministic weighting) ──
+    # groq_key here is just the fallback default if db/user_id somehow
+    # aren't available below — both extraction functions resolve their own
+    # key(s) from the shared pool internally when given db + user_id,
+    # including per-chunk pool draws for genuine multi-key parallelism on
+    # a single request (see utils/llm_extraction.py and utils/groq_pool.py).
     groq_key = await get_credential(db, current_user.id, "groq", "api_key")
     groq_model = await get_groq_model(db, current_user.id)
     ollama_creds = await get_all_credentials(db, current_user.id, "ollama") if ollama_enabled() else {}
@@ -549,7 +557,7 @@ async def analyze_resume(
 
     result = await _score_resume(
         final_resume, final_jd, groq_key, groq_model,
-        ollama_base_url=ollama_base_url, ollama_model=ollama_model, db=db,
+        ollama_base_url=ollama_base_url, ollama_model=ollama_model, db=db, user_id=current_user.id,
     )
 
     return result

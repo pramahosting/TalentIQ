@@ -24,7 +24,14 @@ DATABASE_URL = re.sub(r'[?&]sslmode=\S+', '', DATABASE_URL).rstrip('?').strip()
 
 engine = create_async_engine(
     DATABASE_URL, echo=False, future=True,
-    pool_size=2, max_overflow=3, pool_timeout=60,
+    # Widened from pool_size=2/max_overflow=3 (5 total) — too small given
+    # this session's concurrent access patterns (per-candidate and
+    # per-chunk Groq key pool resolution, concurrent candidate scoring in
+    # CandidateLens), which could genuinely queue behind only 5 available
+    # connections even though the actual work is meant to run in parallel.
+    # 10+20=30 comfortably fits even Neon's smallest compute tier's
+    # max_connections (~97 usable on 0.25 CU) with plenty of headroom.
+    pool_size=10, max_overflow=20, pool_timeout=60,
     pool_recycle=300, pool_pre_ping=True,
     connect_args={"ssl": "require"},
 )

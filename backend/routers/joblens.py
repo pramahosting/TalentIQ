@@ -307,7 +307,7 @@ async def extract_jd_details(jd_text: str, groq_key: str, groq_model: str = DEFA
         from langchain.schema import HumanMessage
         from utils.llm_extraction import _truncate_for_llm
 
-        llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.1, max_tokens=4000, reasoning_format="hidden")
+        llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.1, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
         prompt = f"""You are a recruitment AI assistant. Read the job description below and
 extract these fields precisely. If a field genuinely isn't stated anywhere
 in the text, return an empty string for it — do NOT guess, and do NOT
@@ -593,7 +593,7 @@ async def generate_questions(jd_text: str, candidate_name: str, matched_skills: 
         from langchain.schema import HumanMessage
         from utils.llm_extraction import _truncate_for_llm, _parse_json_response
 
-        llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.4, max_tokens=4000, reasoning_format="hidden")
+        llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.4, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
         skills_str = ", ".join(matched_skills[:8]) if matched_skills else "relevant skills"
         prompt = f"""You are a recruitment AI assistant.
 Generate exactly 5 interview questions for {candidate_name} based on the Job Description below.
@@ -645,7 +645,7 @@ async def generate_resume_summary(cv_text: str, groq_key: Optional[str], groq_mo
             from langchain.schema import HumanMessage
             from utils.llm_extraction import _truncate_for_llm, _parse_json_response
 
-            llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.2, max_tokens=4000, reasoning_format="hidden")
+            llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.2, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
             prompt = f"""You are a recruitment analyst producing a sharp, specific candidate
 summary for a recruiter who is short on time. Read the resume below and
 extract the MOST relevant and important points — prioritize specifics
@@ -875,8 +875,11 @@ async def run_joblens(
     if not cv_files and not source_candidates:
         raise HTTPException(400, "At least one CV is required (upload files, or select candidates from Vendor Management).")
 
-    # ── Get Groq key (own key first, falls back to admin-configured global) ──
-    groq_key = await get_credential(db, current_user.id, "groq", "api_key")
+    # ── Get Groq key (own key first, else the healthiest key in the shared
+    # pool — see utils/groq_pool.py) ──
+    from utils.groq_pool import resolve_groq_key
+    key_resolution = await resolve_groq_key(db, current_user.id)
+    groq_key = key_resolution["groq_key"]
     groq_model = await get_groq_model(db, current_user.id)
     ollama_creds = await get_all_credentials(db, current_user.id, "ollama") if ollama_enabled() else {}
     ollama_base_url = ollama_creds.get("base_url")
@@ -955,7 +958,15 @@ async def run_joblens(
     async def _score_and_build_candidate(
         content: bytes, filename: str,
         source_vendor_id=None, source_vendor_name=None, source_tracked_candidate_id=None,
+        call_groq_key=None, call_groq_model=None,
     ):
+        # Falls back to the shared groq_key/groq_model if no per-candidate
+        # key was resolved for this call — keeps this function safe to
+        # call exactly as before if a caller doesn't opt into per-candidate
+        # pool draws.
+        _groq_key = call_groq_key if call_groq_key is not None else groq_key
+        _groq_model = call_groq_model if call_groq_model is not None else groq_model
+
         cv_text = extract_text(content, filename)
         if not cv_text.strip():
             return None
@@ -971,20 +982,31 @@ async def run_joblens(
         # from ~3x a single Groq call to ~1x the slowest of the three —
         # on top of the existing between-candidate concurrency, this is
         # where the real "3 resumes taking forever" time was going.
+        #
+        # NOTE: db/user_id are deliberately NOT passed to
+        # extract_candidate_strengths here — this function is already
+        # called concurrently across MULTIPLE candidates sharing the same
+        # DB session (see _score_with_limit below), so enabling its
+        # internal per-CHUNK pool resolution here too would mean multiple
+        # candidates' internal DB calls racing on the same session, which
+        # SQLAlchemy's AsyncSession doesn't allow. Instead, each CANDIDATE
+        # gets its own pre-resolved key up front (see the dispatch loop
+        # below) — multi-key parallelism happens at the candidate level
+        # here, not the chunk level within one candidate.
         from utils.llm_extraction import extract_candidate_strengths
         jd_focus_skills = (jd_details.get("essential", []) + jd_details.get("good_to_have", []))[:8]
 
         strengths_task = _with_groq_limit(extract_candidate_strengths(
             cv_text,
             {"essential": jd_details.get("essential", []), "good_to_have": jd_details.get("good_to_have", [])},
-            groq_key, groq_model,
+            _groq_key, _groq_model,
             ollama_base_url=ollama_base_url, ollama_model=ollama_model, known_terms_hint=known_terms,
         ))
         questions_task = (
-            _with_groq_limit(generate_questions(final_jd, info["name"], jd_focus_skills, groq_key, groq_model))
-            if groq_key else asyncio.sleep(0, result=None)
+            _with_groq_limit(generate_questions(final_jd, info["name"], jd_focus_skills, _groq_key, _groq_model))
+            if _groq_key else asyncio.sleep(0, result=None)
         )
-        summary_task = _with_groq_limit(generate_resume_summary(cv_text, groq_key, groq_model))
+        summary_task = _with_groq_limit(generate_resume_summary(cv_text, _groq_key, _groq_model))
 
         strengths_breakdown, questions_result, resume_summary = await asyncio.gather(
             strengths_task, questions_task, summary_task,
@@ -1058,16 +1080,45 @@ async def run_joblens(
     # candidates are in flight here; their calls simply queue for a slot.
     _score_semaphore = asyncio.Semaphore(8)
 
-    async def _score_with_limit(content: bytes, filename: str):
+    async def _score_with_limit(content: bytes, filename: str, call_groq_key=None, call_groq_model=None):
         async with _score_semaphore:
             try:
-                return await _score_and_build_candidate(content, filename)
+                return await _score_and_build_candidate(content, filename, call_groq_key=call_groq_key, call_groq_model=call_groq_model)
             except Exception as e:
                 print(f"Error processing {filename}: {e}")
                 return None
 
     upload_payloads = [(await upload.read(), upload.filename) for upload in cv_files]
-    scored = await asyncio.gather(*[_score_with_limit(content, filename) for content, filename in upload_payloads])
+
+    # Resolve a key for EACH candidate SEQUENTIALLY before any concurrent
+    # work starts — key resolution is a DB call, and these candidates are
+    # about to be scored CONCURRENTLY sharing this same session, so every
+    # DB touch for key selection has to happen up front, one at a time,
+    # never inside the concurrent gather itself. This is what gives a
+    # single CandidateLens batch genuine multi-key parallelism: different
+    # candidates draw different pool keys, all processed at the same time.
+    candidate_key_assignments = []
+    for _ in upload_payloads:
+        from utils.groq_pool import resolve_groq_key
+        kr = await resolve_groq_key(db, current_user.id)
+        candidate_key_assignments.append((kr["groq_key"], kr["model"] or groq_model, kr["pool_id"] if kr["source"] == "pool" else None))
+
+    scored = await asyncio.gather(*[
+        _score_with_limit(content, filename, call_groq_key=candidate_key_assignments[i][0], call_groq_model=candidate_key_assignments[i][1])
+        for i, (content, filename) in enumerate(upload_payloads)
+    ])
+
+    # Report each candidate's key outcome sequentially, now that all
+    # concurrent scoring is done — same reasoning as above, this is a DB
+    # write and must not race with other DB access on this session.
+    for i, candidate in enumerate(scored):
+        _, _, pool_id = candidate_key_assignments[i]
+        if pool_id is None:
+            continue
+        from utils.groq_pool import record_key_outcome
+        succeeded = bool(candidate and (candidate.strengths_breakdown or {}).get("aiPowered"))
+        await record_key_outcome(db, pool_id, success=succeeded)
+
     for candidate in scored:
         if candidate:
             db.add(candidate)
@@ -1129,6 +1180,14 @@ async def run_joblens(
     # while a key is still technically configured. Report real per-candidate
     # outcomes instead, so a silent degradation is never invisible again.
     ai_powered_flags = [bool((c.strengths_breakdown or {}).get("aiPowered")) for c in candidates]
+
+    # Report the outcome back to the pool — if at least one candidate in
+    # this session succeeded via AI, the key is healthy; if none did while
+    # relying on the shared pool, that's a signal to route around it for a
+    # while (see utils/groq_pool.py for the cooldown/auto-recovery logic).
+    if groq_key and key_resolution["source"] == "pool":
+        from utils.groq_pool import record_key_outcome
+        await record_key_outcome(db, key_resolution["pool_id"], success=any(ai_powered_flags) if ai_powered_flags else False)
 
     return {
         "session_id": session.id,
@@ -1419,7 +1478,7 @@ async def _analyze_transcript(
     from langchain_groq import ChatGroq
     from langchain.schema import HumanMessage
 
-    llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.2, max_tokens=4000, reasoning_format="hidden")
+    llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.2, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
     questions_block = "\n".join(f"{i+1}. {q}" for i, q in enumerate(questions)) or "(not recorded)"
     prompt = f"""You are an experienced hiring manager reviewing a recorded video
 interview transcript for {candidate_name}. Be fair and evidence-based — only

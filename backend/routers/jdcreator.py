@@ -133,7 +133,7 @@ def _call_groq(prompt: str, groq_key: str, groq_model: str = DEFAULT_GROQ_MODEL)
     from langchain_groq import ChatGroq
     from langchain.schema import HumanMessage
 
-    llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.35, max_tokens=4000, reasoning_format="hidden")
+    llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.35, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
     resp = llm.invoke([HumanMessage(content=prompt)])
     return resp.content
 
