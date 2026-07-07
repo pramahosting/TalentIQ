@@ -429,14 +429,14 @@ export default function LandingPage() {
             </div>
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "#475569", marginBottom: 16 }}>Tech Stack</div>
-              {["React + TypeScript", "FastAPI (Python)", "PostgreSQL (Neon)", "LangChain + Groq", "Playwright"].map(t => (
+              {["React + TypeScript", "PostgreSQL", "Playwright"].map(t => (
                 <div key={t} style={{ fontSize: 13, color: "#475569", marginBottom: 10 }}>{t}</div>
               ))}
             </div>
           </div>
           <div style={{ borderTop: "1px solid #1e293b", paddingTop: 24, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div style={{ fontSize: 12, color: "#475569" }}>© {new Date().getFullYear()} TalentIQ Platform. All rights reserved.</div>
-            <div style={{ fontSize: 12, color: "#475569" }}>Built with LangChain · Groq · Playwright · Neon</div>
+            <div style={{ fontSize: 12, color: "#475569" }}>Built with LangChain · Playwright </div>
           </div>
         </div>
       </footer>
